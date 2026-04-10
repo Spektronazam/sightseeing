@@ -1,0 +1,3128 @@
+-- ============================================================
+--  DESPAIR ORBIT v8.3 — syndrez 2026 (player dropdown + click block)
+--  Register-safe: ALL state lives in named tables.
+--  OLED Black UI + Sideboard + Horizontal Tabs
+--  Corner radius setting (smooth tween) + saved config
+-- ============================================================
+
+if _G.DESPAIRv8Cleanup then pcall(_G.DESPAIRv8Cleanup) task.wait(0.6) end
+
+-- ── MATH / STRING / TABLE SHORTHANDS (hot-path locals) ──
+local V2,V3,CF,C3         = Vector2.new,Vector3.new,CFrame.new,Color3.fromRGB
+local rad,sin,cos,abs     = math.rad,math.sin,math.cos,math.abs
+local floor,clamp,pi      = math.floor,math.clamp,math.pi
+local sqrt,exp,huge       = math.sqrt,math.exp,math.huge
+local mn,mx,rng           = math.min,math.max,math.random
+local tk                  = tick or os.clock
+local sfmt,ssub,slen,slow = string.format,string.sub,string.len,string.lower
+local tremove,tcreate     = table.remove,table.create
+local tsort,tconcat       = table.sort,table.concat
+
+local ZV2,ZV3,WHITE = V2(0,0),V3(0,0,0),Color3.new(1,1,1)
+
+-- ═════════════════════════════════════════════════════════════
+--  CAPABILITIES
+-- ═════════════════════════════════════════════════════════════
+local Cap = {
+	drawing     = pcall(function() local d=Drawing.new("Line") d:Remove() end),
+	drawFonts   = pcall(function() return Drawing.Fonts.Plex end),
+	writefile   = type(writefile)=="function",
+	readfile    = type(readfile)=="function",
+	isfile      = type(isfile)=="function",
+	setclip     = type(setclipboard)=="function",
+	getgenv     = type(getgenv)=="function",
+	gethui      = type(gethui)=="function",
+	coreGui     = false,
+}
+do
+	local ok,g = pcall(function()
+		if Cap.gethui then return gethui() end
+		return game:GetService("CoreGui")
+	end)
+	Cap.coreGui = ok and g ~= nil
+end
+
+-- ═════════════════════════════════════════════════════════════
+--  SERVICES
+-- ═════════════════════════════════════════════════════════════
+local svc = {}
+do
+	local function get(n)
+		local ok,s = pcall(game.GetService,game,n)
+		return ok and s or nil
+	end
+	svc.rs   = get("RunService")
+	svc.plrs = get("Players")
+	svc.uis  = get("UserInputService")
+	svc.ws   = get("Workspace") or workspace
+	svc.ts   = get("TweenService")
+	svc.hs   = get("HttpService")
+	svc.vim  = get("VirtualInputManager")
+	svc.vu   = get("VirtualUser")
+	svc.stats= get("Stats")
+	svc.cas  = get("ContextActionService")
+	svc.cg   = (function()
+		if Cap.gethui then local ok,r=pcall(gethui) if ok and r then return r end end
+		local ok,r=pcall(game.GetService,game,"CoreGui")
+		if ok and r then Cap.coreGui=true return r end
+		return nil
+	end)()
+	svc.cam  = svc.ws.CurrentCamera
+	svc.lp   = svc.plrs and svc.plrs.LocalPlayer
+	if svc.lp == nil and svc.plrs then
+		svc.plrs:GetPropertyChangedSignal("LocalPlayer"):Wait()
+		svc.lp = svc.plrs.LocalPlayer
+	end
+	if not (svc.rs and svc.plrs and svc.uis and svc.ts and svc.ws and svc.cam and svc.lp) then
+		warn("[DESPAIR v8.3] Critical services missing — aborting.")
+		return
+	end
+end
+
+-- ═════════════════════════════════════════════════════════════
+--  SAFE HELPERS
+-- ═════════════════════════════════════════════════════════════
+local H = {}
+
+function H.prop(i,p)  local ok,v=pcall(function() return i[p] end) return ok and v or nil end
+function H.set(i,p,v) pcall(function() i[p]=v end) end
+function H.kill(i)    if i then pcall(function() i:Destroy() end) end end
+function H.mk(cn,pr)
+	local ok,i = pcall(Instance.new,cn)
+	if not ok or not i then return nil end
+	if pr then for k,v in pairs(pr) do pcall(function() i[k]=v end) end end
+	return i
+end
+
+function H.lerp(a,b,t)  return a+(b-a)*clamp(t,0,1) end
+function H.lerpV3(a,b,t)
+	t=clamp(t,0,1)
+	return V3(H.lerp(a.X,b.X,t),H.lerp(a.Y,b.Y,t),H.lerp(a.Z,b.Z,t))
+end
+function H.damp(c,g,sp,dt) return H.lerp(c,g,1-exp(-sp*dt*12)) end
+function H.dampV3(c,g,sp,dt) return H.lerpV3(c,g,1-exp(-sp*dt*12)) end
+function H.safeV3(v)
+	if not v or typeof(v)~="Vector3" then return ZV3 end
+	if v.X~=v.X or v.Y~=v.Y or v.Z~=v.Z then return ZV3 end
+	return V3(clamp(v.X,-1e6,1e6),clamp(v.Y,-1e6,1e6),clamp(v.Z,-1e6,1e6))
+end
+function H.hsv(h,s,v) return Color3.fromHSV(clamp(h,0,1),clamp(s,0,1),clamp(v,0,1)) end
+function H.w2v(pos)
+	local ok,sp,on = pcall(function() return svc.cam:WorldToViewportPoint(H.safeV3(pos)) end)
+	return ok and sp or nil, ok and on or false
+end
+function H.validChr(c)
+	if not c then return false end
+	local ok,pa = pcall(function() return c.Parent end)
+	return ok and pa ~= nil
+end
+function H.getHum(c)
+	if not H.validChr(c) then return nil end
+	local ok,h = pcall(function() return c:FindFirstChildOfClass("Humanoid") end)
+	return ok and h or nil
+end
+function H.getRoot(c)
+	if not H.validChr(c) then return nil end
+	local ok,r = pcall(function()
+		return c:FindFirstChild("HumanoidRootPart") or c:FindFirstChild("Torso")
+	end)
+	return ok and r or nil
+end
+function H.isAlive(p)
+	if not p then return false end
+	local okPar = pcall(function() return p.Parent end)
+	if not okPar then return false end
+	local chr = H.prop(p,"Character")
+	if not H.validChr(chr) then return false end
+	local hum = H.getHum(chr)
+	local hp  = hum and H.prop(hum,"Health")
+	return hp and hp > 0
+end
+function H.myChr()  return H.prop(svc.lp,"Character") end
+function H.myRoot() return H.getRoot(H.myChr()) end
+
+-- ═════════════════════════════════════════════════════════════
+--  ERROR BOUNDARY
+-- ═════════════════════════════════════════════════════════════
+local Err = {count=0, log={}, MAX=80, LIMIT=1000}
+local function safe(fn,...)
+	local ok,e = pcall(fn,...)
+	if not ok then
+		Err.count += 1
+		if #Err.log < Err.MAX then
+			Err.log[#Err.log+1] = {t=tk(), e=ssub(tostring(e),1,220)}
+		end
+		if Err.count > Err.LIMIT then
+			warn("[DESPAIR v8.3] Error threshold exceeded — unloading.")
+			if _G.DESPAIRv8Cleanup then task.defer(_G.DESPAIRv8Cleanup) end
+		end
+	end
+	return ok,e
+end
+
+-- ═════════════════════════════════════════════════════════════
+--  FRAME CACHE
+-- ═════════════════════════════════════════════════════════════
+local F = {
+	vpX=1920, vpY=1080, scrX=960, scrY=540,
+	camCF=CF(), camPos=ZV3, dt=0.016,
+	now=0,
+}
+local function cacheFrame(dt2)
+	F.dt  = clamp(dt2 or 0.016, 0.0001, 0.1)
+	F.now = tk()
+	local okVP,vp = pcall(function() return svc.cam.ViewportSize end)
+	if okVP and vp then F.vpX=mx(vp.X,1) F.vpY=mx(vp.Y,1) F.scrX=F.vpX*.5 F.scrY=F.vpY*.5 end
+	local okCF,cf = pcall(function() return svc.cam.CFrame end)
+	if okCF and cf then F.camCF=cf F.camPos=cf.Position end
+end
+
+-- ═════════════════════════════════════════════════════════════
+--  CONNECTION MANAGER
+-- ═════════════════════════════════════════════════════════════
+local Conn = {list={}}
+local function hook(c)
+	if c and typeof(c)=="RBXScriptConnection" then Conn.list[#Conn.list+1]=c end
+	return c
+end
+local function unhookAll()
+	for i=#Conn.list,1,-1 do
+		local c=Conn.list[i]
+		if c then pcall(function() if c.Connected then c:Disconnect() end end) end
+		Conn.list[i]=nil
+	end
+	Conn.list={}
+end
+
+-- ═════════════════════════════════════════════════════════════
+--  DRAWING LAYER
+-- ═════════════════════════════════════════════════════════════
+local Draw = {
+	alive = setmetatable({},{__mode="k"}),
+	count = 0,
+	LIMIT = 3000,
+	defFont = (Cap.drawFonts and Drawing.Fonts.Plex) or 0,
+}
+
+local function mkDraw(kind,props)
+	if not Cap.drawing or Draw.count >= Draw.LIMIT then return nil end
+	local ok,d = pcall(Drawing.new,kind)
+	if not ok or not d then return nil end
+	Draw.count += 1
+	Draw.alive[d] = true
+	if props then
+		for k,v in pairs(props) do pcall(function() d[k]=v end) end
+	end
+	pcall(function() d.Visible = props and props.Visible or false end)
+	return d
+end
+local function dVis(d,v)  if d and Draw.alive[d] then pcall(function() d.Visible=v end) end end
+local function dSet(d,k,v) if d and Draw.alive[d] then pcall(function() d[k]=v end) end end
+local function dNuke(d)
+	if not d then return end
+	if Draw.alive[d] then Draw.count=mx(0,Draw.count-1) Draw.alive[d]=nil end
+	pcall(function() d.Visible=false end)
+	pcall(function() d:Remove() end)
+end
+local function mkText(p)
+	p=p or {}
+	return mkDraw("Text",{
+		Text=p.Text or "", Size=p.Size or 14, Font=p.Font or Draw.defFont,
+		Position=p.Position or ZV2, Center=p.Center or false,
+		Outline=p.Outline~=nil and p.Outline or true,
+		Color=p.Color or WHITE, Transparency=p.Alpha or 1,
+		Visible=false, ZIndex=p.Z or 50,
+	})
+end
+local function mkRect(p)
+	p=p or {}
+	return mkDraw("Square",{
+		Size=p.Size or V2(10,10), Position=p.Position or ZV2,
+		Color=p.Color or WHITE, Filled=p.Filled or false,
+		Thickness=p.Thick or 1, Transparency=p.Alpha or 1,
+		Visible=false, ZIndex=p.Z or 50,
+	})
+end
+local function mkLine(p)
+	p=p or {}
+	return mkDraw("Line",{
+		From=p.From or ZV2, To=p.To or ZV2,
+		Color=p.Color or WHITE, Thickness=p.Thick or 1,
+		Transparency=p.Alpha or 1, Visible=false, ZIndex=p.Z or 50,
+	})
+end
+local function mkCirc(p)
+	p=p or {}
+	return mkDraw("Circle",{
+		Position=p.Position or ZV2, Radius=p.R or 10,
+		Color=p.Color or WHITE, Filled=p.Filled or false,
+		Thickness=p.Thick or 1, Transparency=p.Alpha or 1,
+		NumSides=p.Sides or 64, Visible=false, ZIndex=p.Z or 50,
+	})
+end
+
+-- ═════════════════════════════════════════════════════════════
+--  DRAWING OBJECTS TABLE
+-- ═════════════════════════════════════════════════════════════
+local D = {
+	wmBG=nil, wmTx=nil, wmAc=nil, wmBord=nil, wmLast="",
+	tgtBox=nil, tgtTrace=nil, tgtInfo=nil, tgtHP=nil, tgtHPBG=nil,
+	tgtDist=nil, tgtName=nil, tgtSnap=nil,
+	bones={},
+	posInd=nil, matCirc=nil, pathLines={}, trail={}, ringLines={},
+	hudBg=nil, hudDot=nil, hudN=nil, hudState=nil, hudSpeed=nil,
+	radar={bg=nil, border=nil, dots={}, self=nil, north=nil, label=nil},
+	cx={l=nil,r=nil,t=nil,b=nil,dot=nil},
+	coordTx=nil,
+	tgtHL=nil,
+	speedLines={},
+	toastShadow=nil,
+}
+
+local function buildDrawings()
+	D.wmBG    = mkRect({Filled=true,  Color=C3(0,0,0), Z=9000, Alpha=0.85})
+	D.wmTx    = mkText({Size=12, Color=C3(240,240,240), Z=9002})
+	D.wmAc    = mkRect({Filled=true,  Color=C3(140,60,255), Z=9001, Alpha=0.9})
+	D.wmBord  = mkRect({Color=C3(70,30,120),Thick=1, Z=9001, Alpha=0.55})
+
+	D.tgtBox  = mkRect({Thick=1, Z=44, Alpha=0.75})
+	D.tgtTrace= mkLine({Thick=1, Z=45, Alpha=0.55})
+	D.tgtInfo = mkText({Center=true, Size=11, Z=200, Alpha=0.9})
+	D.tgtHP   = mkRect({Filled=true, Z=46, Alpha=0.9})
+	D.tgtHPBG = mkRect({Filled=true, Color=C3(60,10,10), Z=45, Alpha=0.75})
+	D.tgtName = mkText({Center=true, Size=12, Z=201, Alpha=0.95})
+	D.tgtDist = mkText({Center=true, Size=10, Z=200, Alpha=0.85})
+	D.tgtSnap = mkLine({Thick=1, Z=43, Alpha=0.7})
+
+	D.posInd  = mkCirc({R=4, Filled=true, Z=55, Alpha=0.9})
+	D.matCirc = mkCirc({Sides=72, Z=998, Thick=1, Alpha=0.35})
+
+	D.hudBg   = mkCirc({R=30, Thick=1, Z=100, Alpha=0.22})
+	D.hudDot  = mkCirc({R=3, Filled=true, Z=101, Alpha=0.85})
+	D.hudN    = mkText({Size=8, Center=true, Z=102, Alpha=0.55})
+	D.hudState= mkText({Size=9, Center=true, Z=102, Alpha=0.65})
+	D.hudSpeed= mkText({Size=8, Center=true, Z=102, Alpha=0.6})
+
+	D.coordTx = mkText({Size=11, Z=150, Alpha=0.65})
+
+	D.radar.bg     = mkRect({Filled=true, Color=C3(0,0,0), Z=900, Alpha=0.78})
+	D.radar.border = mkRect({Thick=1, Color=C3(80,35,140), Z=901, Alpha=0.45})
+	D.radar.self   = mkCirc({R=3, Filled=true, Color=C3(80,255,120), Z=903, Alpha=0.9})
+	D.radar.north  = mkText({Size=7, Center=true, Z=903, Alpha=0.6})
+	D.radar.label  = mkText({Size=8, Center=true, Z=903, Alpha=0.65})
+
+	D.cx.l   = mkLine({Thick=1, Z=500, Alpha=0.55})
+	D.cx.r   = mkLine({Thick=1, Z=500, Alpha=0.55})
+	D.cx.t   = mkLine({Thick=1, Z=500, Alpha=0.55})
+	D.cx.b   = mkLine({Thick=1, Z=500, Alpha=0.55})
+	D.cx.dot = mkCirc({R=2, Filled=true, Z=501, Alpha=0.7})
+
+	for i=1,8 do D.speedLines[i] = mkLine({Thick=1.5, Z=60, Alpha=0.6}) end
+	for i=1,14 do D.bones[i] = mkLine({Thick=1, Z=47, Alpha=0.6}) end
+end
+buildDrawings()
+
+-- ═════════════════════════════════════════════════════════════
+--  PERFORMANCE MONITOR
+-- ═════════════════════════════════════════════════════════════
+local Perf = {fps=60, frames=0, last=tk(), ping=50, pingT=0}
+local function tickFps()
+	Perf.frames += 1
+	local now = tk()
+	if now - Perf.last >= 0.5 then
+		Perf.fps    = floor(Perf.frames / (now-Perf.last) + 0.5)
+		Perf.frames = 0
+		Perf.last   = now
+	end
+end
+local function getPing()
+	local now = tk()
+	if now - Perf.pingT < 2 then return Perf.ping end
+	Perf.pingT = now
+	pcall(function()
+		local st = svc.stats
+		if not st then return end
+		local net = H.prop(st,"Network"); if not net then return end
+		local item = H.prop(net,"ServerStatsItem"); if not item then return end
+		local p = item["Data Ping"]
+		if p then Perf.ping = floor(clamp(p:GetValue(),1,9999)) end
+	end)
+	return Perf.ping
+end
+
+-- ═════════════════════════════════════════════════════════════
+--  THEME
+-- ═════════════════════════════════════════════════════════════
+local Thm = {
+	Base=C3(0,0,0),
+	Panel=C3(6,6,7),
+	Panel2=C3(10,10,12),
+	Stroke=C3(40,40,52),
+	Stroke2=C3(65,30,120),
+
+	Txt=C3(240,240,245),
+	Sub=C3(150,150,170),
+	Dim=C3(95,95,120),
+
+	Acc=C3(150,60,255),
+	AccB=C3(190,120,255),
+	AccD=C3(95,35,170),
+	Ok=C3(80,255,120),
+	Bad=C3(230,70,70),
+	Warn=C3(255,200,80),
+
+	Fnt=Enum.Font.SourceSans,
+	BFnt=Enum.Font.SourceSansBold,
+
+	TSz=14, IH=34, W=520, H=640,
+	hue=0.78,
+}
+local function updateThemeAccent()
+	Thm.hue = (Thm.hue + F.dt * 0.035) % 1
+	Thm.Acc  = H.hsv(Thm.hue, 0.55, 0.95)
+	Thm.AccB = H.hsv(Thm.hue, 0.30, 1.00)
+	Thm.AccD = H.hsv(Thm.hue, 0.65, 0.60)
+end
+
+-- ═════════════════════════════════════════════════════════════
+--  TWEEN HELPER
+-- ═════════════════════════════════════════════════════════════
+local TwCache = {}
+local function Tw(inst,pr,dur,sty)
+	if not inst then return nil end
+	dur=dur or .18; sty=sty or Enum.EasingStyle.Quint
+	local old=TwCache[inst]; if old then pcall(old.Cancel,old) end
+	local ok,t = pcall(function()
+		return svc.ts:Create(inst,TweenInfo.new(dur,sty,Enum.EasingDirection.Out),pr)
+	end)
+	if not ok or not t then return nil end
+	TwCache[inst]=t; t:Play()
+	t.Completed:Once(function() if TwCache[inst]==t then TwCache[inst]=nil end end)
+	return t
+end
+
+-- ═════════════════════════════════════════════════════════════
+--  FILE I/O
+-- ═════════════════════════════════════════════════════════════
+local IO = {}
+function IO.write(n,d)
+	if not Cap.writefile then return false end
+	return pcall(writefile,n,d)
+end
+function IO.read(n)
+	if not Cap.readfile then return nil end
+	local ex=false
+	if Cap.isfile then pcall(function() ex=isfile(n) end) end
+	if not ex then return nil end
+	local ok,d = pcall(readfile,n); return ok and d or nil
+end
+function IO.jsonEncode(t)
+	local ok,j = pcall(svc.hs.JSONEncode,svc.hs,t)
+	return ok and j or nil
+end
+function IO.jsonDecode(s)
+	local ok,d = pcall(svc.hs.JSONDecode,svc.hs,s)
+	return ok and d or nil
+end
+
+-- ═════════════════════════════════════════════════════════════
+--  CONFIG
+-- ═════════════════════════════════════════════════════════════
+local Cfg = {
+	orbit = {
+		on=false, targetName="", speed=150, distance=10, height=0,
+		lookAt=true, skyHeight=300, transSpeed=5, autoNoclip=true,
+		prediction=false, predStr=0.12, predPing=true,
+		offX=0, offY=0, offZ=0,
+		pattern="Circle",
+		ellipseRatio=0.5,
+		helixAmp=5, helixFreq=2,
+		sineAmp=3, sineFreq=3,
+		flowerPetals=5,
+		lissajousA=3, lissajousB=2, lissajousPhase=0,
+		roseK=3,
+		epicN=3, epicR=0.5,
+
+		showPath=false, pathSegs=48, smoothness=8,
+
+		tgtHighlight=false, tgtTracer=false, tgtInfo=true,
+		tgtBox=false, tgtHealthBar=true, tgtSkeleton=false,
+		tgtSnap=false, tgtName=true,
+
+		autoNearest=false, smartTarget=false,
+		autoSwitchCooldown=1.6,
+		losCheck=false,
+
+		toggleKey="None", reverseKey="None", freezeKey="None",
+		cycleNextKey="None", cyclePrevKey="None",
+		ghostKey="None",
+
+		mode="Orbit", followDist=8, followSmooth=6, followOffY=0,
+
+		camMode="Free", camLockDist=15, camLockHeight=8,
+		camChaseSmooth=5, camReturnDist=30, camPanSpeed=1.2,
+
+		banking=false, bankAngle=15, bankSmooth=6,
+		speedRamp=true, rampAccel=3, rampDecel=5,
+
+		trail=true, trailLen=24, trailFade=true,
+
+		distRing=false, posIndicator=false,
+		antiVoid=true, voidFloor=10,
+		hud=true, hudCompass=true,
+		radar=false, radarRange=220,
+		crosshair=false, speedLines=false,
+		coordDisplay=false,
+
+		recordOrbit=false,
+	},
+	misc = {
+		noclip=false, infJump=false, fly=false, flySpd=50,
+		spdMod=false, spdVal=16, jmpMod=false, jmpVal=50,
+		fovMod=false, fovVal=70,
+		autoRespawn=false, thirdPerson=false, tpDist=10,
+		wm=true, antiAfk=false,
+
+		matOn=false, matType="Glass", matRadius=40,
+		matShowRadius=false, matFade=true, matFadeRange=10,
+
+		autoPress=false, apKey="Q", apInterval=0.1, apDuration=0.05,
+
+		whitelist=false,
+		ghost=false,
+		noFallDmg=false,
+	},
+	ui = {
+		corner=10,
+		scale=1.0,
+		toastScale=1.0,
+	},
+}
+local CFG_FILE     = "DESPAIR_v81_CFG.json"
+local PROFILE_DIR  = "DESPAIR_PROFILES/"
+
+local AP -- forward decl (we set after definition)
+
+local function saveCfg(name)
+	local file = name and (PROFILE_DIR..name..".json") or CFG_FILE
+
+	-- sync runtime → config for autopress
+	if AP then
+		Cfg.misc.autoPress  = AP.on
+		Cfg.misc.apKey      = AP.key
+		Cfg.misc.apInterval = AP.interval
+		Cfg.misc.apDuration = AP.duration
+	end
+
+	local t={}
+	for cat,tbl in pairs(Cfg) do
+		t[cat]={}
+		for k,v in pairs(tbl) do t[cat][k]=v end
+	end
+	local j = IO.jsonEncode(t)
+	if j then IO.write(file,j) end
+end
+local function loadCfgFrom(file)
+	local raw = IO.read(file); if not raw then return end
+	local d = IO.jsonDecode(raw); if type(d)~="table" then return end
+	for cat,tbl in pairs(d) do
+		if type(tbl)=="table" and Cfg[cat] then
+			for k,v in pairs(tbl) do
+				if Cfg[cat][k]~=nil and type(v)==type(Cfg[cat][k]) then
+					Cfg[cat][k]=v
+				end
+			end
+		end
+	end
+end
+
+-- ═════════════════════════════════════════════════════════════
+--  WHITELIST
+-- ═════════════════════════════════════════════════════════════
+local WL = {list={}, enabled=false}
+local WL_FILE = "DESPAIR_WHITELIST.txt"
+
+local function wlSave()
+	if not Cap.writefile then return end
+	local lines={}
+	for n in pairs(WL.list) do lines[#lines+1]=n end
+	tsort(lines)
+	IO.write(WL_FILE, tconcat(lines,"\n"))
+end
+local function wlLoad()
+	local d = IO.read(WL_FILE); if not d then return end
+	WL.list={}
+	for n in d:gmatch("[^\n]+") do
+		n=n:match("^%s*(.-)%s*$")
+		if n and #n>0 then WL.list[slow(n)]=true end
+	end
+end
+local function wlCheck(n) if not WL.enabled then return true end return n and WL.list[slow(n)] or false end
+
+-- ═════════════════════════════════════════════════════════════
+--  AUTO PRESS
+-- ═════════════════════════════════════════════════════════════
+AP = { on=false, key="Q", interval=0.1, duration=0.05, last=0, pressing=false, pressStart=0 }
+local function tickAutoPress()
+	if not AP.on or not svc.vim then return end
+	local kc = Enum.KeyCode[AP.key]
+	if not kc then return end
+	local now = tk()
+	if AP.pressing then
+		if now-AP.pressStart >= AP.duration then
+			pcall(function() svc.vim:SendKeyEvent(false,kc,false,game) end)
+			AP.pressing=false
+		end
+	elseif now-AP.last >= AP.interval then
+		pcall(function() svc.vim:SendKeyEvent(true,kc,false,game) end)
+		AP.pressing=true; AP.pressStart=now; AP.last=now
+	end
+end
+
+-- ═════════════════════════════════════════════════════════════
+--  VELOCITY BUFFER
+-- ═════════════════════════════════════════════════════════════
+local VB = {data={}, MAX=10, ALPHA=0.25}
+local function smoothedVel(root)
+	if not root then return ZV3 end
+	local ok,vel = pcall(function() return root.AssemblyLinearVelocity end)
+	if not ok then return ZV3 end
+	vel = H.safeV3(vel)
+	local chr = H.prop(root,"Parent"); if not chr then return vel end
+	local b = VB.data[chr]
+	if not b then b={s=tcreate(VB.MAX),i=0,c=0,est=vel} VB.data[chr]=b end
+	b.est = H.lerpV3(b.est,vel,VB.ALPHA)
+	b.i = (b.i%VB.MAX)+1; b.s[b.i]=b.est; b.c=mn(b.c+1,VB.MAX)
+	local sum,w = ZV3,0
+	for i=1,b.c do
+		local idx=((b.i-i)%VB.MAX)+1; local sv=b.s[idx]
+		if sv then local wt=exp(-(i-1)*0.25); sum=sum+sv*wt; w+=wt end
+	end
+	return w>0 and H.safeV3(sum*(1/w)) or b.est
+end
+
+-- ═════════════════════════════════════════════════════════════
+--  ORBIT RECORDING
+-- ═════════════════════════════════════════════════════════════
+local Rec = { recording=false, replaying=false, frames={}, maxFrames=2400, idx=1 }
+local function recTick(pos)
+	if not Rec.recording or not Cfg.orbit.recordOrbit then return end
+	if #Rec.frames >= Rec.maxFrames then
+		Rec.recording=false
+		return
+	end
+	Rec.frames[#Rec.frames+1] = H.safeV3(pos)
+end
+local function recGetReplayPos()
+	if not Rec.replaying or #Rec.frames==0 then return nil end
+	Rec.idx = (Rec.idx%#Rec.frames)+1
+	return Rec.frames[Rec.idx]
+end
+
+-- ═════════════════════════════════════════════════════════════
+--  NOTIFICATIONS
+-- ═════════════════════════════════════════════════════════════
+local Nf = {active={}, pool={}}
+local NfStyle = {
+	info    = {color=C3(150,180,255), icon="i"},
+	success = {color=C3(90,255,140),  icon="✓"},
+	warning = {color=C3(255,210,90),  icon="!"},
+	error   = {color=C3(255,80,80),   icon="x"},
+	orbit   = {color=C3(190,120,255), icon="⟳"},
+}
+
+local function mkNfSlot()
+	local s = {}
+	s.shadow = mkRect({Filled=true, Color=C3(0,0,0), Z=11000, Alpha=0.7})
+	s.bg     = mkRect({Filled=true, Color=C3(0,0,0), Z=11001, Alpha=0.86})
+	s.bord   = mkRect({Thick=1,      Color=C3(80,30,140), Z=11002, Alpha=0.35})
+	s.acc    = mkRect({Filled=true,  Color=C3(190,120,255), Z=11002, Alpha=0.85})
+	s.tx     = mkText({Size=14, Z=11003, Alpha=0.95})
+	s.icon   = mkText({Size=14, Center=true, Z=11003, Alpha=0.95})
+	s.prog   = mkRect({Filled=true,  Z=11000, Alpha=0.55})
+	return s
+end
+
+local function pushNf(msg,dur,nt)
+	dur = dur or 3; nt = nt or "info"
+	local style = NfStyle[nt] or NfStyle.info
+	local slot  = tremove(Nf.pool) or mkNfSlot()
+	if not slot then return end
+	slot.msg   = ssub(tostring(msg),1,160)
+	slot.born  = tk(); slot.life = dur
+	slot.alpha = 0
+	slot.color = style.color
+	slot.icon  = style.icon
+	slot.offY  = -18
+	Nf.active[#Nf.active+1] = slot
+end
+
+local function tickNfs(dt)
+	local now = tk()
+	local scale = clamp(Cfg.ui.toastScale or 1, 0.7, 1.5)
+	local padX, padY = 14*scale, 10*scale
+	local gap = 8*scale
+
+	local centerX = F.scrX
+	local topY = 22
+
+	local dead=nil
+	for i,n in ipairs(Nf.active) do
+		local age = now - n.born
+		local a = mn(clamp(age/.14,0,1), clamp((n.life-age)/.22,0,1))
+		n.alpha = a
+		n.offY  = H.damp(n.offY,0,0.35,dt)
+		if age > n.life then
+			dead = dead or {}; dead[#dead+1]=i
+			dVis(n.shadow,false); dVis(n.bg,false); dVis(n.bord,false)
+			dVis(n.acc,false); dVis(n.tx,false); dVis(n.icon,false); dVis(n.prog,false)
+		else
+			dSet(n.tx,"Text",n.msg)
+			dSet(n.tx,"Color",Thm.Txt)
+
+			local tb = (Draw.alive[n.tx] and H.prop(n.tx,"TextBounds")) or V2(slen(n.msg)*8,16)
+			local bw = tb.X + padX*2 + 34*scale
+			local bh = tb.Y + padY*2
+
+			local px = centerX - bw/2
+			local py = topY + (i-1)*(bh+gap) + n.offY
+
+			dSet(n.shadow,"Size",V2(bw, bh))
+			dSet(n.shadow,"Position",V2(px+2, py+3))
+			dSet(n.shadow,"Transparency",0.65*a)
+			dVis(n.shadow,true)
+
+			dSet(n.bg,"Size",V2(bw, bh))
+			dSet(n.bg,"Position",V2(px, py))
+			dSet(n.bg,"Transparency",0.88*a)
+			dVis(n.bg,true)
+
+			dSet(n.bord,"Size",V2(bw, bh))
+			dSet(n.bord,"Position",V2(px, py))
+			dSet(n.bord,"Color",n.color)
+			dSet(n.bord,"Transparency",0.25*a)
+			dVis(n.bord,true)
+
+			dSet(n.acc,"Size",V2(4*scale, bh-6))
+			dSet(n.acc,"Position",V2(px+2, py+3))
+			dSet(n.acc,"Color",n.color)
+			dSet(n.acc,"Transparency",0.85*a)
+			dVis(n.acc,true)
+
+			dSet(n.icon,"Text",n.icon)
+			dSet(n.icon,"Color",n.color)
+			dSet(n.icon,"Position",V2(px+18*scale, py+bh/2-7*scale))
+			dSet(n.icon,"Transparency",0.95*a)
+			dVis(n.icon,true)
+
+			dSet(n.tx,"Position",V2(px+34*scale, py+padY-1))
+			dSet(n.tx,"Transparency",0.98*a)
+			dVis(n.tx,true)
+
+			local pct = clamp(1-(age/n.life),0,1)
+			dSet(n.prog,"Size",V2(bw*pct, 2))
+			dSet(n.prog,"Position",V2(px, py+bh-2))
+			dSet(n.prog,"Color",n.color)
+			dSet(n.prog,"Transparency",0.55*a)
+			dVis(n.prog,true)
+		end
+	end
+	if dead then
+		for j=#dead,1,-1 do
+			local n = tremove(Nf.active,dead[j])
+			dVis(n.shadow,false); dVis(n.bg,false); dVis(n.bord,false)
+			dVis(n.acc,false); dVis(n.tx,false); dVis(n.icon,false); dVis(n.prog,false)
+			Nf.pool[#Nf.pool+1] = n
+		end
+	end
+end
+
+-- ═════════════════════════════════════════════════════════════
+--  LOAD CFG + WL
+-- ═════════════════════════════════════════════════════════════
+loadCfgFrom(CFG_FILE)
+wlLoad()
+WL.enabled = Cfg.misc.whitelist
+
+AP.on       = Cfg.misc.autoPress
+AP.key      = Cfg.misc.apKey
+AP.interval = Cfg.misc.apInterval
+AP.duration = Cfg.misc.apDuration
+
+-- ═════════════════════════════════════════════════════════════
+--  ORBIT STATE
+-- ═════════════════════════════════════════════════════════════
+local Orb = {
+	state="idle", angle=0, tgtPlr=nil,
+	lastKnownPos=nil, currentPos=nil,
+	tgtConns={},
+	direction=1, frozen=false,
+	curSpeed=0, bankAngle=0, prevAngle=0,
+	prevPos=nil, speedMag=0,
+	lastAutoSwitchT=0,
+}
+local OrbNames = {
+	idle="⏸ Idle", orbiting="⟳ Orbiting",
+	ascending="⬆ Ascending", hovering="⏳ Hovering",
+	descending="⬇ Descending", following="➤ Following",
+	replaying="▶ Replay",
+}
+local UI = {
+	statusLabel=nil,
+	orbitToggle=nil,
+	tgtDD=nil,
+	wlCountLbl=nil,
+	win=nil,
+}
+local Warn = { noTargetT = 0 }
+local function clearTgtConns()
+	for _,c in ipairs(Orb.tgtConns) do
+		pcall(function() if c and c.Connected then c:Disconnect() end end)
+	end
+	Orb.tgtConns={}
+end
+
+local function hideAllViz()
+	dVis(D.tgtTrace,false); dVis(D.tgtInfo,false); dVis(D.posInd,false)
+	dVis(D.tgtBox,false);   dVis(D.tgtHP,false);   dVis(D.tgtHPBG,false)
+	dVis(D.tgtName,false);  dVis(D.tgtDist,false); dVis(D.tgtSnap,false)
+	dVis(D.hudBg,false);    dVis(D.hudDot,false);  dVis(D.hudN,false)
+	dVis(D.hudState,false); dVis(D.hudSpeed,false)
+	for i=1,#D.bones do dVis(D.bones[i],false) end
+	for i=1,#D.pathLines do dVis(D.pathLines[i],false) end
+	for i=1,#D.trail do dVis(D.trail[i],false) end
+	for i=1,#D.ringLines do dVis(D.ringLines[i],false) end
+	for i=1,#D.speedLines do dVis(D.speedLines[i],false) end
+	dVis(D.radar.bg,false); dVis(D.radar.border,false); dVis(D.radar.self,false)
+	dVis(D.radar.north,false); dVis(D.radar.label,false)
+	for _,dot in ipairs(D.radar.dots) do if dot and dot.circ then dVis(dot.circ,false) end end
+	dVis(D.cx.l,false); dVis(D.cx.r,false); dVis(D.cx.t,false); dVis(D.cx.b,false); dVis(D.cx.dot,false)
+	dVis(D.coordTx,false)
+	if D.tgtHL then pcall(function() D.tgtHL.Enabled=false end) end
+end
+
+local function transitionToIdle(reason)
+	Orb.state="idle"; Orb.lastKnownPos=nil; Orb.currentPos=nil
+	Orb.curSpeed=0;   Orb.frozen=false;    Orb.prevPos=nil
+	Orb.speedMag=0
+	clearTgtConns(); Orb.tgtPlr=nil; hideAllViz()
+	if reason then pushNf(reason,3,"warning") end
+end
+
+local function resolveTarget()
+	local name=Cfg.orbit.targetName
+	if not name or name=="" or name=="None" then return nil end
+	for _,p in ipairs(svc.plrs:GetPlayers()) do
+		if p~=svc.lp and p.Name==name then return p end
+	end
+	return nil
+end
+
+local function setupTargetHooks(tgtPlr)
+	clearTgtConns(); Orb.tgtPlr=tgtPlr
+	local c1 = tgtPlr.CharacterRemoving:Connect(function()
+		if Orb.state=="orbiting" or Orb.state=="descending" or Orb.state=="following" then
+			pushNf(tgtPlr.Name.." died — ascending",3,"warning")
+			Orb.state="ascending"
+		end
+	end)
+	local c2 = tgtPlr.CharacterAdded:Connect(function(chr)
+		if Orb.state~="hovering" and Orb.state~="ascending" then return end
+		task.defer(function()
+			local timeout=tk()+8
+			while tk()<timeout do
+				local r=H.getRoot(chr); local hm=H.getHum(chr)
+				if r and hm and H.prop(hm,"Health") and H.prop(hm,"Health")>0 then break end
+				task.wait(0.15)
+			end
+			if Orb.state=="hovering" or Orb.state=="ascending" then
+				pushNf(tgtPlr.Name.." respawned — descending",3,"success")
+				Orb.state="descending"
+			end
+		end)
+	end)
+	table.insert(Orb.tgtConns,c1)
+	table.insert(Orb.tgtConns,c2)
+end
+
+hook(svc.plrs.PlayerRemoving:Connect(function(p)
+	if Orb.tgtPlr and Orb.tgtPlr==p then
+		Cfg.orbit.targetName="None"
+		transitionToIdle(p.Name.." left — orbit stopped")
+	end
+	if p.Character then VB.data[p.Character]=nil end
+end))
+
+-- ═════════════════════════════════════════════════════════════
+--  PATTERNS
+-- ═════════════════════════════════════════════════════════════
+local Patterns = {}
+function Patterns.Circle(a,c)      local r=rad(a); return V3(cos(r)*c.distance,c.height,sin(r)*c.distance) end
+function Patterns.Ellipse(a,c)     local r=rad(a); local rt=clamp(c.ellipseRatio,0.1,1); return V3(cos(r)*c.distance,c.height,sin(r)*c.distance*rt) end
+function Patterns.Figure8(a,c)     local r=rad(a); local s2=sin(r); local den=mx(1+s2*s2,0.01); return V3(cos(r)/den*c.distance, c.height, (s2*cos(r)/den)*c.distance) end
+function Patterns.Helix(a,c)       local r=rad(a); return V3(cos(r)*c.distance, c.height+sin(r*c.helixFreq)*c.helixAmp, sin(r)*c.distance) end
+function Patterns.Sine(a,c)        local r=rad(a); local wave=sin(r*c.sineFreq)*c.sineAmp; return V3(cos(r)*c.distance+wave*sin(r), c.height, sin(r)*c.distance+wave*cos(r)) end
+function Patterns.Flower(a,c)      local r=rad(a); local rr=c.distance*abs(cos(c.flowerPetals*r)); return V3(cos(r)*rr,c.height,sin(r)*rr) end
+function Patterns.Lissajous(a,c)   local r=rad(a); local ph=rad(c.lissajousPhase); return V3(c.distance*sin(c.lissajousA*r+ph),c.height,c.distance*sin(c.lissajousB*r)) end
+function Patterns.Spiral(a,c)      local r=rad(a); local pct=(a%360)/360; local sr=c.distance*(0.2+0.8*pct); return V3(cos(r)*sr,c.height+pct*c.helixAmp,sin(r)*sr) end
+function Patterns.Square(a,c)      local r=rad(a); local nx,nz=cos(r),sin(r); local sc=c.distance/mx(abs(nx),abs(nz),0.01); return V3(nx*sc,c.height,nz*sc) end
+function Patterns.Rose(a,c)        local r=rad(a); local rr=c.distance*abs(cos(c.roseK*r)); return V3(cos(r)*rr,c.height,sin(r)*rr) end
+function Patterns.Epicycloid(a,c)
+	local r=rad(a); local R2=c.distance; local r2=R2*c.epicR
+	local x=(R2+r2)*cos(r)-r2*cos((R2+r2)*r/mx(r2,0.01))
+	local z=(R2+r2)*sin(r)-r2*sin((R2+r2)*r/mx(r2,0.01))
+	return V3(x*.5,c.height,z*.5)
+end
+function Patterns.Random(a,c)
+	local r=rad(a)
+	local nx=sin(r*1.7+0.3)*cos(r*0.9+1.1)*c.distance
+	local nz=cos(r*1.3+0.7)*sin(r*2.1+0.5)*c.distance
+	return V3(nx,c.height+sin(r*2.3)*c.helixAmp,nz)
+end
+local function computeOffset(angle,pat)
+	local fn = Patterns[pat] or Patterns.Circle
+	return fn(angle,Cfg.orbit)
+end
+
+-- ═════════════════════════════════════════════════════════════
+--  TARGET WORLD POSITION
+-- ═════════════════════════════════════════════════════════════
+local function getTargetWorldPos(root)
+	local ok,pos = pcall(function() return root.Position end); if not ok then return ZV3 end
+	pos = H.safeV3(pos) + V3(Cfg.orbit.offX,Cfg.orbit.offY,Cfg.orbit.offZ)
+	if Cfg.orbit.prediction then
+		local vel = smoothedVel(root)
+		if vel.Magnitude > 0.5 then
+			local pingComp = Cfg.orbit.predPing and getPing()/1000 or 0
+			pos = H.safeV3(pos + vel*(Cfg.orbit.predStr + pingComp))
+		end
+	end
+	return pos
+end
+
+-- ═════════════════════════════════════════════════════════════
+--  LINE OF SIGHT CHECK
+-- ═════════════════════════════════════════════════════════════
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Exclude
+rayParams.IgnoreWater = true
+
+local function hasLineOfSight(toPos, ignoreList)
+	local fromRoot = H.myRoot()
+	if not fromRoot then return true end
+	local origin = fromRoot.Position + V3(0,1.6,0)
+	local dir = (toPos - origin)
+	if dir.Magnitude < 1 then return true end
+	rayParams.FilterDescendantsInstances = ignoreList or {H.myChr()}
+	local hit = svc.ws:Raycast(origin, dir, rayParams)
+	return hit == nil
+end
+
+-- ═════════════════════════════════════════════════════════════
+--  SMART TARGETING
+-- ═════════════════════════════════════════════════════════════
+local function scoreTarget(p)
+	local root = H.getRoot(H.prop(p,"Character")); if not root then return huge end
+	local myRoot = H.myRoot(); if not myRoot then return huge end
+	local ok,dist = pcall(function() return (root.Position-myRoot.Position).Magnitude end)
+	if not ok then return huge end
+	if Cfg.orbit.losCheck and not hasLineOfSight(root.Position + V3(0,1.5,0), {H.myChr(), H.prop(p,"Character")}) then
+		dist = dist + 250
+	end
+	local hum = H.getHum(H.prop(p,"Character"))
+	local hp  = hum and H.prop(hum,"Health") or 1
+	local maxHp = hum and H.prop(hum,"MaxHealth") or 100
+	local hpRatio = hp / mx(maxHp,1)
+	return dist * 0.55 + hpRatio * 220
+end
+
+local function findBestTarget()
+	local best,bs = nil,huge
+	for _,p in ipairs(svc.plrs:GetPlayers()) do
+		if p==svc.lp or not H.isAlive(p) then continue end
+		if not wlCheck(p.Name) then continue end
+		local sc = scoreTarget(p)
+		if sc < bs then bs=sc; best=p end
+	end
+	return best
+end
+
+local function findNearest()
+	if Cfg.orbit.smartTarget then return findBestTarget() end
+	local best,bd = nil,huge
+	local myRoot  = H.myRoot(); if not myRoot then return nil end
+	local myPos = myRoot.Position
+	for _,p in ipairs(svc.plrs:GetPlayers()) do
+		if p==svc.lp or not H.isAlive(p) then continue end
+		if not wlCheck(p.Name) then continue end
+		local root = H.getRoot(H.prop(p,"Character")); if not root then continue end
+		local d = (root.Position-myPos).Magnitude
+		if Cfg.orbit.losCheck and not hasLineOfSight(root.Position + V3(0,1.5,0), {H.myChr(), H.prop(p,"Character")}) then
+			d = d + 250
+		end
+		if d < bd then bd=d; best=p end
+	end
+	return best
+end
+
+-- ═════════════════════════════════════════════════════════════
+--  GHOST MODE
+-- ═════════════════════════════════════════════════════════════
+local Ghost = {active=false, origTrans={}}
+local function setGhost(on)
+	Ghost.active = on
+	local chr = H.myChr(); if not H.validChr(chr) then return end
+	pcall(function()
+		for _,p in ipairs(chr:GetDescendants()) do
+			if p:IsA("BasePart") and p.Name~="HumanoidRootPart" then
+				if on then
+					Ghost.origTrans[p] = p.LocalTransparencyModifier
+					p.LocalTransparencyModifier = 0.88
+					p.CanCollide = false
+				else
+					p.LocalTransparencyModifier = Ghost.origTrans[p] or 0
+					Ghost.origTrans[p] = nil
+				end
+			end
+		end
+	end)
+end
+
+-- ═════════════════════════════════════════════════════════════
+--  VISUALS
+-- ═════════════════════════════════════════════════════════════
+local Viz = {}
+Viz.BONE_PAIRS = {
+	{"Head","UpperTorso"}, {"UpperTorso","LowerTorso"},
+	{"UpperTorso","LeftUpperArm"}, {"LeftUpperArm","LeftLowerArm"}, {"LeftLowerArm","LeftHand"},
+	{"UpperTorso","RightUpperArm"},{"RightUpperArm","RightLowerArm"},{"RightLowerArm","RightHand"},
+	{"LowerTorso","LeftUpperLeg"},{"LeftUpperLeg","LeftLowerLeg"},{"LeftLowerLeg","LeftFoot"},
+	{"LowerTorso","RightUpperLeg"},{"RightUpperLeg","RightLowerLeg"},{"RightLowerLeg","RightFoot"},
+}
+
+local function ensureLines(tbl,n) while #tbl < mn(n,64) do tbl[#tbl+1]=mkLine({Z=40,Thick=1,Alpha=0.35}) end end
+local function ensureCircs(tbl,n) while #tbl < mn(n,32) do tbl[#tbl+1]=mkCirc({Filled=true,Z=42,R=2,Alpha=0.6}) end end
+
+function Viz.tickSkeleton(tgtChr)
+	if not Cfg.orbit.tgtSkeleton or not H.validChr(tgtChr) then
+		for i=1,#D.bones do dVis(D.bones[i],false) end; return
+	end
+	for i,pair in ipairs(Viz.BONE_PAIRS) do
+		local pA = tgtChr:FindFirstChild(pair[1],true)
+		local pB = tgtChr:FindFirstChild(pair[2],true)
+		local ln = D.bones[i]
+		if pA and pB and ln then
+			local spA,onA = H.w2v(pA.Position)
+			local spB,onB = H.w2v(pB.Position)
+			if onA and onB and spA and spB then
+				dSet(ln,"From",V2(spA.X,spA.Y)); dSet(ln,"To",V2(spB.X,spB.Y))
+				dSet(ln,"Color",Thm.AccB); dSet(ln,"Transparency",0.55); dVis(ln,true)
+			else dVis(ln,false) end
+		elseif ln then dVis(ln,false) end
+	end
+end
+
+function Viz.tickHealthBar(tgtRoot,tgtHum)
+	if not Cfg.orbit.tgtHealthBar or not tgtRoot or not tgtHum then
+		dVis(D.tgtHP,false); dVis(D.tgtHPBG,false); return
+	end
+	local hp    = H.prop(tgtHum,"Health") or 0
+	local maxHp = H.prop(tgtHum,"MaxHealth") or 100
+	local pct   = clamp(hp/mx(maxHp,1),0,1)
+	local sp,on = H.w2v(tgtRoot.Position)
+	if not on or not sp then dVis(D.tgtHP,false); dVis(D.tgtHPBG,false); return end
+	local dist  = (F.camPos-tgtRoot.Position).Magnitude
+	local h     = clamp(4200/mx(dist,5),18,320)
+	local barH,barW = h, 4
+	local bx,by = sp.X-h/2-barW-3, sp.Y-barH/2
+	dSet(D.tgtHPBG,"Size",V2(barW,barH)); dSet(D.tgtHPBG,"Position",V2(bx,by)); dSet(D.tgtHPBG,"Transparency",0.78); dVis(D.tgtHPBG,true)
+	dSet(D.tgtHP,"Size",V2(barW,barH*pct)); dSet(D.tgtHP,"Position",V2(bx,by+barH*(1-pct)))
+	dSet(D.tgtHP,"Color",H.hsv(pct*0.33,0.9,0.95)); dSet(D.tgtHP,"Transparency",0.85); dVis(D.tgtHP,true)
+end
+
+function Viz.tickTargetESP(tgtPlr,tgtRoot)
+	if not tgtPlr or not tgtRoot then
+		dVis(D.tgtBox,false); dVis(D.tgtTrace,false); dVis(D.tgtInfo,false)
+		dVis(D.tgtName,false); dVis(D.tgtDist,false); dVis(D.tgtSnap,false)
+		Viz.tickHealthBar(nil,nil); Viz.tickSkeleton(nil); return
+	end
+	local chr = H.prop(tgtPlr,"Character")
+	local hum = H.getHum(chr)
+	local sp,on = H.w2v(tgtRoot.Position)
+	local topSp,onTop  = H.w2v(tgtRoot.Position+V3(0,3.5,0))
+	local dist  = sp and (F.camPos-tgtRoot.Position).Magnitude or 0
+
+	if Cfg.orbit.tgtBox and on and sp then
+		local s = clamp(4200/mx(dist,5),12,360)
+		dSet(D.tgtBox,"Size",V2(s,s)); dSet(D.tgtBox,"Position",V2(sp.X-s/2,sp.Y-s/2))
+		dSet(D.tgtBox,"Color",Thm.Acc); dSet(D.tgtBox,"Transparency",0.55); dVis(D.tgtBox,true)
+	else dVis(D.tgtBox,false) end
+
+	if Cfg.orbit.tgtTracer and on and sp then
+		dSet(D.tgtTrace,"From",V2(F.scrX,F.vpY))
+		dSet(D.tgtTrace,"To",V2(sp.X,sp.Y))
+		dSet(D.tgtTrace,"Color",Thm.Acc); dSet(D.tgtTrace,"Transparency",0.55); dVis(D.tgtTrace,true)
+	else dVis(D.tgtTrace,false) end
+
+	if Cfg.orbit.tgtSnap and on and sp then
+		dSet(D.tgtSnap,"From",V2(F.scrX,F.scrY))
+		dSet(D.tgtSnap,"To",V2(sp.X,sp.Y))
+		dSet(D.tgtSnap,"Color",Thm.Warn); dSet(D.tgtSnap,"Transparency",0.7); dVis(D.tgtSnap,true)
+	else dVis(D.tgtSnap,false) end
+
+	if Cfg.orbit.tgtName and onTop and topSp then
+		dSet(D.tgtName,"Text",tgtPlr.Name)
+		dSet(D.tgtName,"Position",V2(topSp.X,topSp.Y-14))
+		dSet(D.tgtName,"Color",Thm.AccB)
+		dSet(D.tgtName,"Size",clamp(18-dist/30,9,16)); dVis(D.tgtName,true)
+	else dVis(D.tgtName,false) end
+
+	if Cfg.orbit.tgtInfo and onTop and topSp and hum then
+		local hp   = H.prop(hum,"Health") or 0
+		dSet(D.tgtInfo,"Text",sfmt("❤%d  📏%dm",floor(hp),floor(dist)))
+		dSet(D.tgtInfo,"Position",V2(topSp.X,topSp.Y-27))
+		dSet(D.tgtInfo,"Color",C3(255,210,220))
+		dSet(D.tgtInfo,"Size",clamp(16-dist/35,8,14)); dVis(D.tgtInfo,true)
+	else dVis(D.tgtInfo,false) end
+
+	Viz.tickHealthBar(tgtRoot,hum)
+	Viz.tickSkeleton(chr)
+
+	if Cfg.orbit.tgtHighlight and H.validChr(chr) then
+		if not D.tgtHL then pcall(function()
+			D.tgtHL=Instance.new("Highlight")
+			D.tgtHL.DepthMode=Enum.HighlightDepthMode.AlwaysOnTop
+			D.tgtHL.FillTransparency=0.78; D.tgtHL.OutlineTransparency=0.1
+			local ok=pcall(function() D.tgtHL.Parent=svc.cg end)
+			if not ok then pcall(function() D.tgtHL.Parent=svc.lp:WaitForChild("PlayerGui",2) end) end
+		end) end
+		if D.tgtHL then pcall(function()
+			D.tgtHL.Adornee=chr
+			D.tgtHL.FillColor=Thm.Acc
+			D.tgtHL.OutlineColor=WHITE
+			D.tgtHL.Enabled=true
+		end) end
+	elseif D.tgtHL then
+		pcall(function() D.tgtHL.Enabled=false; D.tgtHL.Adornee=nil end)
+	end
+end
+
+function Viz.tickPath(basePos)
+	if not Cfg.orbit.showPath or not Cfg.orbit.on then
+		for i=1,#D.pathLines do dVis(D.pathLines[i],false) end; return
+	end
+	local segs = clamp(Cfg.orbit.pathSegs,12,64)
+	ensureLines(D.pathLines,segs)
+	local step = 360/segs
+	local prevSp,prevOn
+	for i=0,segs do
+		local wPos = H.safeV3(basePos+computeOffset(i*step,Cfg.orbit.pattern))
+		local sp,on = H.w2v(wPos)
+		if i>0 then
+			local ln = D.pathLines[i]
+			if ln and prevOn and on and prevSp and sp then
+				dSet(ln,"From",V2(prevSp.X,prevSp.Y)); dSet(ln,"To",V2(sp.X,sp.Y))
+				dSet(ln,"Color",H.hsv(i/segs*0.8,0.8,1)); dSet(ln,"Transparency",0.35); dVis(ln,true)
+			elseif ln then dVis(ln,false) end
+		end
+		prevSp=sp; prevOn=on
+	end
+	for i=segs+1,#D.pathLines do dVis(D.pathLines[i],false) end
+end
+
+function Viz.tickTrail(pos)
+	if not Cfg.orbit.trail then
+		for i=1,#D.trail do dVis(D.trail[i],false) end; return
+	end
+	local len = clamp(Cfg.orbit.trailLen,2,30)
+	ensureCircs(D.trail,len)
+	for i=len,2,-1 do
+		local prev,cur2 = D.trail[i-1],D.trail[i]
+		if Draw.alive[prev] and Draw.alive[cur2] then
+			dSet(cur2,"Position",prev.Position); dSet(cur2,"Color",prev.Color)
+		end
+	end
+	local sp,on = H.w2v(H.safeV3(pos))
+	if on and sp and Draw.alive[D.trail[1]] then
+		dSet(D.trail[1],"Position",V2(sp.X,sp.Y))
+		dSet(D.trail[1],"Color",Thm.AccB)
+		dSet(D.trail[1],"Transparency",0.9)
+		dSet(D.trail[1],"Radius",3); dVis(D.trail[1],true)
+	end
+	for i=2,len do
+		local c = D.trail[i]
+		if Draw.alive[c] then
+			local fade = Cfg.orbit.trailFade and (1-i/len)*0.82 or 0.6
+			dSet(c,"Transparency",mx(fade,0.05))
+			dSet(c,"Radius",mx(1,3*(1-i/len)))
+			dSet(c,"Color",H.hsv(0.78-i/len*0.28,0.85,1))
+			dVis(c,true)
+		end
+	end
+	for i=len+1,#D.trail do dVis(D.trail[i],false) end
+end
+
+function Viz.tickHudCompass(tgtPos)
+	if not Cfg.orbit.hud or not Cfg.orbit.hudCompass or not tgtPos then
+		dVis(D.hudBg,false); dVis(D.hudDot,false)
+		dVis(D.hudN,false);  dVis(D.hudState,false); dVis(D.hudSpeed,false); return
+	end
+	local cx,cy,r = 84,F.vpY-94,34
+	dSet(D.hudBg,"Position",V2(cx,cy)); dSet(D.hudBg,"Radius",r)
+	dSet(D.hudBg,"Color",Thm.Acc); dSet(D.hudBg,"Transparency",0.22); dVis(D.hudBg,true)
+	local myRoot = H.myRoot(); if not myRoot then return end
+	local myPos = myRoot.Position
+	local dx,dz = myPos.X-tgtPos.X, myPos.Z-tgtPos.Z
+	local dist2 = mx(sqrt(dx*dx+dz*dz),0.1)
+	local nrm   = mn(dist2/mx(Cfg.orbit.distance,1),1)
+	local nx,nz = dx/dist2*nrm*r*0.8, dz/dist2*nrm*r*0.8
+	dSet(D.hudDot,"Position",V2(cx+nx,cy+nz))
+	dSet(D.hudDot,"Color",Thm.AccB); dSet(D.hudDot,"Transparency",0.85); dVis(D.hudDot,true)
+	dSet(D.hudN,"Position",V2(cx,cy-r-10)); dSet(D.hudN,"Text","N")
+	dSet(D.hudN,"Color",C3(255,110,110)); dSet(D.hudN,"Transparency",0.4); dVis(D.hudN,true)
+	dSet(D.hudState,"Position",V2(cx,cy+r+6))
+	dSet(D.hudState,"Text",OrbNames[Orb.state] or "")
+	dSet(D.hudState,"Color",Thm.Txt); dSet(D.hudState,"Transparency",0.62); dVis(D.hudState,true)
+	dSet(D.hudSpeed,"Position",V2(cx,cy+r+18))
+	dSet(D.hudSpeed,"Text",sfmt("%.0f st/s",Orb.speedMag))
+	dSet(D.hudSpeed,"Color",Thm.Sub); dSet(D.hudSpeed,"Transparency",0.62); dVis(D.hudSpeed,true)
+end
+
+function Viz.tickRadar()
+	if not Cfg.orbit.radar then
+		dVis(D.radar.bg,false); dVis(D.radar.border,false)
+		dVis(D.radar.self,false); dVis(D.radar.north,false); dVis(D.radar.label,false)
+		for _,dot in ipairs(D.radar.dots) do if dot and dot.circ then dVis(dot.circ,false) end end
+		return
+	end
+	local rsize = 112
+	local rx,ry = F.vpX-(rsize+22), F.vpY-(rsize+34)
+
+	dSet(D.radar.bg,"Size",V2(rsize,rsize)); dSet(D.radar.bg,"Position",V2(rx,ry))
+	dSet(D.radar.bg,"Transparency",0.78); dVis(D.radar.bg,true)
+
+	dSet(D.radar.border,"Size",V2(rsize,rsize)); dSet(D.radar.border,"Position",V2(rx,ry))
+	dSet(D.radar.border,"Transparency",0.4); dSet(D.radar.border,"Color",Thm.AccD); dVis(D.radar.border,true)
+
+	local cx2,cy2 = rx+rsize/2, ry+rsize/2
+	dSet(D.radar.self,"Position",V2(cx2,cy2)); dVis(D.radar.self,true)
+
+	dSet(D.radar.north,"Text","N"); dSet(D.radar.north,"Position",V2(cx2,ry-10))
+	dSet(D.radar.north,"Color",C3(255,110,110)); dSet(D.radar.north,"Transparency",0.55); dVis(D.radar.north,true)
+
+	dSet(D.radar.label,"Text","RADAR"); dSet(D.radar.label,"Position",V2(cx2,ry+rsize+4))
+	dSet(D.radar.label,"Color",Thm.Sub); dSet(D.radar.label,"Transparency",0.65); dVis(D.radar.label,true)
+
+	local myRoot = H.myRoot()
+	local myPos  = myRoot and myRoot.Position or ZV3
+	local range  = mx(Cfg.orbit.radarRange,10)
+	local plrs   = svc.plrs:GetPlayers()
+
+	local di = 1
+	for _,p in ipairs(plrs) do
+		if p~=svc.lp then
+			local root = H.getRoot(H.prop(p,"Character"))
+			if not root then continue end
+			local rpos = root.Position
+			local dx2 = (rpos.X-myPos.X)/range * (rsize/2)
+			local dz2 = (rpos.Z-myPos.Z)/range * (rsize/2)
+			local px2 = cx2+clamp(dx2,-rsize/2,rsize/2)
+			local pz2 = cy2+clamp(dz2,-rsize/2,rsize/2)
+
+			local dot = D.radar.dots[di]
+			if not dot then
+				dot = {circ=mkCirc({R=4,Filled=true,Z=902,Alpha=0.85})}
+				D.radar.dots[di] = dot
+			end
+			dSet(dot.circ,"Position",V2(px2,pz2))
+			dSet(dot.circ,"Color",H.isAlive(p) and C3(255,80,90) or C3(110,110,120))
+			dSet(dot.circ,"Transparency",0.82)
+			dVis(dot.circ,true)
+			di += 1
+		end
+	end
+	for i=di,#D.radar.dots do if D.radar.dots[i] and D.radar.dots[i].circ then dVis(D.radar.dots[i].circ,false) end end
+end
+
+function Viz.tickCrosshair()
+	if not Cfg.orbit.crosshair then
+		dVis(D.cx.l,false); dVis(D.cx.r,false); dVis(D.cx.t,false); dVis(D.cx.b,false); dVis(D.cx.dot,false)
+		return
+	end
+	local cx2,cy2 = F.scrX,F.scrY
+	local gap = 6
+	local len2 = 12
+
+	local col = Thm.AccB
+	local tr  = 0.45
+
+	dSet(D.cx.l,"From",V2(cx2-gap-len2,cy2)); dSet(D.cx.l,"To",V2(cx2-gap,cy2))
+	dSet(D.cx.r,"From",V2(cx2+gap,cy2));      dSet(D.cx.r,"To",V2(cx2+gap+len2,cy2))
+	dSet(D.cx.t,"From",V2(cx2,cy2-gap-len2)); dSet(D.cx.t,"To",V2(cx2,cy2-gap))
+	dSet(D.cx.b,"From",V2(cx2,cy2+gap));      dSet(D.cx.b,"To",V2(cx2,cy2+gap+len2))
+
+	for _,ln in ipairs({D.cx.l,D.cx.r,D.cx.t,D.cx.b}) do
+		dSet(ln,"Color",col); dSet(ln,"Transparency",tr); dVis(ln,true)
+	end
+
+	dSet(D.cx.dot,"Position",V2(cx2,cy2)); dSet(D.cx.dot,"Color",Thm.Acc)
+	dSet(D.cx.dot,"Transparency",0.55); dVis(D.cx.dot,true)
+end
+
+function Viz.tickSpeedLines()
+	if not Cfg.orbit.speedLines or Orb.speedMag < 6 then
+		for i=1,#D.speedLines do dVis(D.speedLines[i],false) end; return
+	end
+	local cx2,cy2  = F.scrX,F.scrY
+	local intensity = clamp(Orb.speedMag/120,0,1)
+	for i=1,8 do
+		local ang = (i-1)*(pi/4) + F.now*0.55
+		local r1  = 44+rng()*18
+		local r2  = r1 + intensity*(70+rng()*80)
+		local ln  = D.speedLines[i]
+		dSet(ln,"From",V2(cx2+cos(ang)*r1, cy2+sin(ang)*r1))
+		dSet(ln,"To",  V2(cx2+cos(ang)*r2, cy2+sin(ang)*r2))
+		dSet(ln,"Color",Thm.AccB); dSet(ln,"Transparency",0.52+0.35*(1-intensity)); dVis(ln,true)
+	end
+end
+
+function Viz.tickCoordDisplay()
+	if not Cfg.orbit.coordDisplay then dVis(D.coordTx,false); return end
+	local myRoot = H.myRoot()
+	local pos    = myRoot and myRoot.Position or ZV3
+	dSet(D.coordTx,"Text",sfmt("X:%.1f  Y:%.1f  Z:%.1f",pos.X,pos.Y,pos.Z))
+	dSet(D.coordTx,"Position",V2(12,F.vpY-24))
+	dSet(D.coordTx,"Color",Thm.Sub); dSet(D.coordTx,"Transparency",0.62); dVis(D.coordTx,true)
+end
+
+-- ═════════════════════════════════════════════════════════════
+--  CAMERA
+-- ═════════════════════════════════════════════════════════════
+local Cam = {
+	active=false, cf=nil, lookTarget=nil, lockPos=nil,
+	engaged=false, phase="idle", panBlend=0, cooldown=0,
+	lastValidCF=nil, tgtAlive=false, tgtPos=nil, lastTgtPos=nil,
+}
+local CAM_KEY = "DESPAIRv81_CAM"
+pcall(function() svc.rs:UnbindFromRenderStep(CAM_KEY) end)
+svc.rs:BindToRenderStep(CAM_KEY,Enum.RenderPriority.Camera.Value+1,function()
+	if Cam.active and Cam.cf then pcall(function() svc.cam.CFrame=Cam.cf end) end
+end)
+
+local function engageCam()  if not Cam.engaged then Cam.engaged=true end end
+local function disengageCam()
+	if not Cam.engaged and not Cam.active then return end
+	Cam.active=false; Cam.cf=nil; Cam.lockPos=nil; Cam.lookTarget=nil
+	Cam.phase="idle"; Cam.panBlend=0; Cam.lastValidCF=nil
+	if Cam.engaged then
+		Cam.engaged=false
+		pcall(function()
+			svc.cam.CameraType=Enum.CameraType.Custom
+			local hum=H.getHum(H.myChr())
+			if hum then svc.cam.CameraSubject=hum end
+		end)
+	end
+end
+
+local function tickCameraSystem(dt)
+	if Cfg.orbit.camMode=="Free" then disengageCam(); return end
+	if Cam.cooldown>0 then Cam.cooldown=mx(0,Cam.cooldown-dt); disengageCam(); return end
+	local hum=H.getHum(H.myChr()); local inCut = (not hum) or ((H.prop(hum,"Health") or 0) <= 0)
+	if inCut or not Cfg.orbit.on or Orb.state=="idle" then disengageCam(); return end
+	safe(function()
+		local myRoot=H.myRoot(); if not myRoot then disengageCam(); return end
+		local myPos=H.safeV3(myRoot.Position); if myPos==ZV3 then return end
+		local tAlive,tPos=Cam.tgtAlive,Cam.tgtPos
+
+		if Cam.phase=="idle" or Cam.phase=="track_target" then
+			if tAlive and tPos then Cam.phase="track_target"
+			elseif not tAlive then
+				if Cam.phase=="track_target" then Cam.lastTgtPos=tPos or Cam.lastTgtPos end
+				Cam.phase="return_to_player"; Cam.panBlend=0
+			end
+		elseif Cam.phase=="return_to_player" then
+			if tAlive and tPos and (myPos-tPos).Magnitude<=Cfg.orbit.camReturnDist then
+				Cam.phase="pan_to_target"; Cam.panBlend=0
+			end
+		elseif Cam.phase=="pan_to_target" then
+			Cam.panBlend=mn(1,Cam.panBlend+dt*clamp(Cfg.orbit.camPanSpeed,0.3,5))
+			if Cam.panBlend>=0.98 then Cam.phase="track_target"; Cam.panBlend=1 end
+			if not tAlive then Cam.phase="return_to_player"; Cam.panBlend=0 end
+		end
+
+		local function getBehind()
+			local bd=-myRoot.CFrame.LookVector; local fb=V3(bd.X,0,bd.Z)
+			if fb.Magnitude<0.1 then fb=V3(0,0,1) end; return fb.Unit
+		end
+
+		local lookGoal,camGoal
+		if Cam.phase=="track_target" and tAlive and tPos then
+			lookGoal=tPos
+			if Cfg.orbit.camMode=="Lock" then
+				camGoal=tPos+V3(0,Cfg.orbit.camLockHeight,Cfg.orbit.camLockDist)
+			else
+				local dir=H.safeV3(myPos-tPos); local flat=V3(dir.X,0,dir.Z)
+				if flat.Magnitude<0.1 then flat=getBehind() end
+				camGoal=myPos+flat.Unit*Cfg.orbit.camLockDist+V3(0,Cfg.orbit.camLockHeight,0)
+			end
+		elseif Cam.phase=="return_to_player" then
+			lookGoal=myPos+V3(0,2,0); camGoal=myPos+getBehind()*Cfg.orbit.camLockDist+V3(0,Cfg.orbit.camLockHeight,0)
+		elseif Cam.phase=="pan_to_target" and tPos then
+			local eb=Cam.panBlend*Cam.panBlend*(3-2*Cam.panBlend)
+			lookGoal=H.lerpV3(myPos+V3(0,2,0),tPos,eb)
+			local pcg=myPos+getBehind()*Cfg.orbit.camLockDist+V3(0,Cfg.orbit.camLockHeight,0)
+			local tcg
+			if Cfg.orbit.camMode=="Lock" then
+				tcg=tPos+V3(0,Cfg.orbit.camLockHeight,Cfg.orbit.camLockDist)
+			else
+				local dir=H.safeV3(myPos-tPos); local flat=V3(dir.X,0,dir.Z)
+				if flat.Magnitude<0.1 then flat=getBehind() end
+				tcg=myPos+flat.Unit*Cfg.orbit.camLockDist+V3(0,Cfg.orbit.camLockHeight,0)
+			end
+			camGoal=H.lerpV3(pcg,tcg,eb)
+		else
+			lookGoal=myPos+V3(0,2,0); camGoal=myPos+getBehind()*Cfg.orbit.camLockDist+V3(0,Cfg.orbit.camLockHeight,0)
+		end
+
+		camGoal=H.safeV3(camGoal); lookGoal=H.safeV3(lookGoal)
+		local sf=clamp(Cfg.orbit.camChaseSmooth*0.04,0.02,1)
+		Cam.lookTarget=Cam.lookTarget and H.dampV3(Cam.lookTarget,lookGoal,sf*1.8,dt) or lookGoal
+		Cam.lockPos   =Cam.lockPos    and H.dampV3(Cam.lockPos,   camGoal, sf,    dt) or camGoal
+		Cam.lockPos=H.safeV3(Cam.lockPos); Cam.lookTarget=H.safeV3(Cam.lookTarget)
+		if (Cam.lookTarget-Cam.lockPos).Magnitude<0.1 then Cam.lookTarget=Cam.lockPos+V3(0,0,-1) end
+		local newCF=CF(Cam.lockPos,Cam.lookTarget); local p2=newCF.Position
+		if p2.X==p2.X and p2.Y==p2.Y and p2.Z==p2.Z then
+			Cam.cf=newCF; Cam.lastValidCF=newCF; engageCam(); Cam.active=true
+		elseif Cam.lastValidCF then Cam.cf=Cam.lastValidCF end
+	end)
+end
+
+-- ═════════════════════════════════════════════════════════════
+--  ANTI-VOID / NOCLIP
+-- ═════════════════════════════════════════════════════════════
+local function tickAntiVoid()
+	if not Cfg.orbit.antiVoid then return end
+	local root=H.myRoot(); if not root then return end
+	pcall(function()
+		if root.Position.Y < Cfg.orbit.voidFloor then
+			root.CFrame=CF(V3(root.Position.X,Cfg.orbit.voidFloor+50,root.Position.Z))
+			root.AssemblyLinearVelocity=ZV3
+			pushNf("Anti-void triggered!",2,"warning")
+		end
+	end)
+end
+local function orbitNoclip()
+	local chr=H.myChr(); if not H.validChr(chr) then return end
+	pcall(function()
+		for _,p in ipairs(chr:GetDescendants()) do
+			if p:IsA("BasePart") then p.CanCollide=false end
+		end
+	end)
+end
+
+-- ═════════════════════════════════════════════════════════════
+--  MAIN ORBIT TICK
+-- ═════════════════════════════════════════════════════════════
+local function applyRootCF(goalPos,lookAt)
+	local myRoot = H.myRoot(); if not myRoot then return end
+	goalPos = H.safeV3(goalPos)
+
+	local s = clamp(Cfg.orbit.smoothness*0.04,0.02,1)
+	Orb.currentPos = Orb.currentPos and H.dampV3(Orb.currentPos,goalPos,s,F.dt) or goalPos
+	Orb.currentPos = H.safeV3(Orb.currentPos)
+
+	if Orb.prevPos then
+		Orb.speedMag = (Orb.currentPos-Orb.prevPos).Magnitude/mx(F.dt,0.001)
+	end
+	Orb.prevPos = Orb.currentPos
+
+	local fCF = lookAt and Cfg.orbit.lookAt and CF(Orb.currentPos,H.safeV3(lookAt)) or CF(Orb.currentPos)
+	if abs(Orb.bankAngle) > 0.1 then fCF = fCF * CFrame.Angles(0,0,rad(Orb.bankAngle)) end
+
+	pcall(function()
+		if myRoot.Anchored then myRoot.Anchored=false end
+		myRoot.CFrame=fCF
+		myRoot.AssemblyLinearVelocity=ZV3
+		myRoot.AssemblyAngularVelocity=ZV3
+	end)
+	recTick(Orb.currentPos)
+end
+
+local function tickOrbitInner(dt)
+	if not Cfg.orbit.on then
+		Cam.tgtAlive=false; Cam.tgtPos=nil
+		if Orb.state~="idle" then transitionToIdle() end
+		return
+	end
+
+	if Rec.replaying then
+		local rpos = recGetReplayPos()
+		if rpos then applyRootCF(rpos,nil) end
+		Orb.state="replaying"
+		return
+	end
+
+	if Cfg.orbit.autoNearest then
+		if (tk()-Orb.lastAutoSwitchT) >= mx(Cfg.orbit.autoSwitchCooldown,0.2) then
+			local nearest = findNearest()
+			if nearest and nearest.Name~=Cfg.orbit.targetName then
+				Orb.lastAutoSwitchT = tk()
+				Cfg.orbit.targetName=nearest.Name
+				Orb.state="idle"
+				pushNf("Auto → "..nearest.Name,2,"orbit")
+				if UI.tgtDD and UI.tgtDD.Set then UI.tgtDD.Set(nearest.Name) end
+			end
+		end
+	end
+
+	local tgtPlr = resolveTarget()
+	if not tgtPlr then
+		if tk()-Warn.noTargetT > 2.2 then
+			Warn.noTargetT = tk()
+			pushNf("No target selected (pick one in UI)", 2.2, "warning")
+		end
+		if Orb.state~="idle" then transitionToIdle() end
+		return
+	end
+	if tgtPlr~=Orb.tgtPlr then clearTgtConns(); setupTargetHooks(tgtPlr); Orb.state="idle" end
+
+	local myRoot = H.myRoot(); if not myRoot then return end
+	if Cfg.orbit.autoNoclip then orbitNoclip() end
+
+	if Cfg.orbit.speedRamp then
+		if Orb.frozen then Orb.curSpeed=H.damp(Orb.curSpeed,0,Cfg.orbit.rampDecel*0.2,dt)
+		else           Orb.curSpeed=H.damp(Orb.curSpeed,Cfg.orbit.speed,Cfg.orbit.rampAccel*0.2,dt) end
+	else
+		Orb.curSpeed=H.damp(Orb.curSpeed,Orb.frozen and 0 or Cfg.orbit.speed,0.5,dt)
+	end
+
+	Orb.prevAngle=Orb.angle
+	Orb.angle=(Orb.angle+Orb.curSpeed*dt*Orb.direction)%3600
+
+	if Cfg.orbit.banking then
+		local delta=Orb.angle-Orb.prevAngle
+		local gb=clamp(delta*Cfg.orbit.bankAngle*0.1,-Cfg.orbit.bankAngle,Cfg.orbit.bankAngle)
+		Orb.bankAngle=H.damp(Orb.bankAngle,gb,Cfg.orbit.bankSmooth*0.04,dt)
+	else
+		Orb.bankAngle=H.damp(Orb.bankAngle,0,0.2,dt)
+	end
+
+	local tgtChr   = H.prop(tgtPlr,"Character")
+	local tgtRoot  = H.validChr(tgtChr) and H.getRoot(tgtChr) or nil
+	local tgtAlive = H.isAlive(tgtPlr)
+	local isFollow = Cfg.orbit.mode=="Follow"
+
+	Cam.tgtAlive = (tgtRoot~=nil and tgtAlive)
+	Cam.tgtPos   = (tgtRoot and getTargetWorldPos(tgtRoot)) or Orb.lastKnownPos
+
+	if Orb.state=="idle" then
+		if tgtRoot and tgtAlive then
+			Orb.state = isFollow and "following" or "orbiting"
+			Orb.lastKnownPos = H.safeV3(tgtRoot.Position)
+			Orb.currentPos   = H.safeV3(myRoot.Position)
+			pushNf((isFollow and "Following " or "Orbiting ")..tgtPlr.Name,2,"orbit")
+		else
+			Orb.lastKnownPos=Orb.lastKnownPos or H.safeV3(myRoot.Position)
+			Orb.currentPos=H.safeV3(myRoot.Position)
+			Orb.state="ascending"
+		end
+	end
+
+	if Orb.state=="orbiting" then
+		if not tgtRoot or not tgtAlive then
+			if tgtRoot then Orb.lastKnownPos=H.safeV3(tgtRoot.Position) end
+			Orb.state="ascending"; pushNf(tgtPlr.Name.." died",3,"warning")
+		else
+			local wp=getTargetWorldPos(tgtRoot); Orb.lastKnownPos=wp
+			applyRootCF(wp+computeOffset(Orb.angle,Cfg.orbit.pattern),wp)
+			Viz.tickPath(wp); Viz.tickTrail(Orb.currentPos)
+			Viz.tickTargetESP(tgtPlr,tgtRoot); Viz.tickHudCompass(wp)
+		end
+
+	elseif Orb.state=="following" then
+		if not tgtRoot or not tgtAlive then
+			if tgtRoot then Orb.lastKnownPos=H.safeV3(tgtRoot.Position) end
+			Orb.state="ascending"; pushNf(tgtPlr.Name.." died",3,"warning")
+		else
+			local wp=getTargetWorldPos(tgtRoot); Orb.lastKnownPos=wp
+			local vel=smoothedVel(tgtRoot); local fv=V3(vel.X,0,vel.Z)
+			local behind=fv.Magnitude>1 and (-fv.Unit) or H.safeV3(myRoot.Position-wp).Unit
+			behind=V3(behind.X,0,behind.Z)
+			if behind.Magnitude<0.1 then behind=V3(0,0,1) end
+			behind=behind.Unit
+
+			local gp=wp+behind*Cfg.orbit.followDist+V3(0,Cfg.orbit.followOffY,0)
+			local fs=clamp(Cfg.orbit.followSmooth*0.04,0.02,1)
+			Orb.currentPos=Orb.currentPos and H.dampV3(Orb.currentPos,H.safeV3(gp),fs,dt) or H.safeV3(gp)
+			local fCF=Cfg.orbit.lookAt and CF(Orb.currentPos,wp) or CF(Orb.currentPos)
+			if abs(Orb.bankAngle)>0.1 then fCF=fCF*CFrame.Angles(0,0,rad(Orb.bankAngle)) end
+			pcall(function() myRoot.CFrame=fCF; myRoot.AssemblyLinearVelocity=ZV3; myRoot.AssemblyAngularVelocity=ZV3 end)
+			recTick(Orb.currentPos)
+
+			Viz.tickTrail(Orb.currentPos); Viz.tickTargetESP(tgtPlr,tgtRoot); Viz.tickHudCompass(wp)
+			for i=1,#D.pathLines do dVis(D.pathLines[i],false) end
+		end
+
+	elseif Orb.state=="ascending" then
+		local bp=Orb.lastKnownPos or V3(0,100,0)
+		local sc=V3(bp.X,bp.Y+Cfg.orbit.skyHeight,bp.Z)
+		local r2=rad(Orb.angle)
+		applyRootCF(sc+V3(cos(r2)*Cfg.orbit.distance,0,sin(r2)*Cfg.orbit.distance),sc)
+		if Orb.currentPos and (H.safeV3(Orb.currentPos)-H.safeV3(sc)).Magnitude<5 then
+			Orb.state="hovering"; pushNf("Hovering — waiting...",3,"info")
+		end
+		if tgtRoot and tgtAlive then
+			Orb.lastKnownPos=H.safeV3(tgtRoot.Position)
+			Orb.state="descending"; pushNf(tgtPlr.Name.." respawned",3,"success")
+		end
+		Viz.tickTrail(Orb.currentPos); Viz.tickTargetESP(tgtPlr,tgtRoot); Viz.tickHudCompass(Orb.lastKnownPos)
+
+	elseif Orb.state=="hovering" then
+		local bp=Orb.lastKnownPos or V3(0,100,0)
+		local hc=V3(bp.X,bp.Y+Cfg.orbit.skyHeight,bp.Z)
+		local r2=rad(Orb.angle)
+		applyRootCF(hc+V3(cos(r2)*Cfg.orbit.distance,0,sin(r2)*Cfg.orbit.distance),hc)
+		if tgtRoot and tgtAlive then
+			Orb.lastKnownPos=H.safeV3(tgtRoot.Position)
+			Orb.state="descending"; pushNf(tgtPlr.Name.." respawned",3,"success")
+		end
+		Viz.tickTrail(Orb.currentPos); Viz.tickTargetESP(tgtPlr,tgtRoot); Viz.tickHudCompass(Orb.lastKnownPos)
+
+	elseif Orb.state=="descending" then
+		if not tgtRoot or not tgtAlive then Orb.state="ascending"; return end
+		local wp=getTargetWorldPos(tgtRoot); Orb.lastKnownPos=wp
+		local gp=wp+computeOffset(Orb.angle,Cfg.orbit.pattern); applyRootCF(gp,wp)
+		if Orb.currentPos and (H.safeV3(Orb.currentPos)-H.safeV3(gp)).Magnitude<5 then
+			Orb.state=isFollow and "following" or "orbiting"
+			pushNf("Resumed "..Cfg.orbit.mode,2,"success")
+		end
+		Viz.tickPath(wp); Viz.tickTrail(Orb.currentPos); Viz.tickTargetESP(tgtPlr,tgtRoot); Viz.tickHudCompass(wp)
+	end
+
+	tickAntiVoid()
+	Viz.tickCrosshair()
+	Viz.tickRadar()
+	Viz.tickSpeedLines()
+	Viz.tickCoordDisplay()
+
+	if UI.statusLabel and UI.statusLabel.SetText then
+		local stTxt=OrbNames[Orb.state] or Orb.state
+		local extra=""
+		if Orb.frozen then extra=extra.." ❄" end
+		if Cfg.misc.ghost then extra=extra.." 👻" end
+		if AP.on then extra=extra.." ⚡" end
+		if Rec.recording then extra=extra.." ⏺" end
+		if Rec.replaying then extra=extra.." ▶" end
+		if Cam.phase~="idle" and Cam.phase~="track_target" and Cfg.orbit.camMode~="Free" then extra=extra.." 🎬" end
+		UI.statusLabel.SetText(stTxt..extra)
+	end
+end
+local function tickOrbit(dt) safe(tickOrbitInner,dt) end
+
+-- ═════════════════════════════════════════════════════════════
+--  WATERMARK
+-- ═════════════════════════════════════════════════════════════
+local function tickWatermark()
+	if not Cfg.misc.wm then
+		dVis(D.wmBG,false); dVis(D.wmTx,false); dVis(D.wmAc,false); dVis(D.wmBord,false); return
+	end
+	local tgtStr=""
+	if Cfg.orbit.on and Orb.state~="idle" then
+		local tn=Orb.tgtPlr and ssub(Orb.tgtPlr.Name,1,12) or "?"
+		tgtStr=" │ "..Cfg.orbit.mode.." "..tn
+	end
+	local recStr=Rec.recording and " │ ⏺REC" or (Rec.replaying and " │ ▶PLY" or "")
+	local text=sfmt("DESPAIR v8.3 │ %dfps │ %dms │ %s%s%s",
+		Perf.fps,getPing(),Cfg.orbit.pattern,tgtStr,recStr)
+
+	dSet(D.wmAc,"Color",Thm.Acc); dSet(D.wmBord,"Color",Thm.AccD); dSet(D.wmBord,"Transparency",0.35)
+
+	if text~=D.wmLast and Draw.alive[D.wmTx] then
+		D.wmLast=text
+		dSet(D.wmTx,"Text",text); dSet(D.wmTx,"Color",Thm.Txt)
+		local tb=H.prop(D.wmTx,"TextBounds") or V2(slen(text)*7,12)
+		local w,h=tb.X+26,tb.Y+12
+		dSet(D.wmBG,"Size",V2(w,h)); dSet(D.wmBG,"Position",V2(10,10))
+		dSet(D.wmAc,"Size",V2(w,2)); dSet(D.wmAc,"Position",V2(10,10+h))
+		dSet(D.wmBord,"Size",V2(w,h)); dSet(D.wmBord,"Position",V2(10,10))
+		dSet(D.wmTx,"Position",V2(22,16))
+	end
+	dVis(D.wmBG,true); dVis(D.wmAc,true); dVis(D.wmTx,true); dVis(D.wmBord,true)
+end
+
+-- ═════════════════════════════════════════════════════════════
+--  SMART MATERIAL
+-- ═════════════════════════════════════════════════════════════
+local Mat = {originals={}, active={}, faded={}}
+local matOLP = OverlapParams.new()
+matOLP.FilterType=Enum.RaycastFilterType.Exclude
+
+local function tickSmartMat()
+	if not Cfg.misc.matOn then
+		for p,orig in pairs(Mat.originals) do if p and p.Parent then pcall(function() p.Material=orig end) end end
+		for p,orig in pairs(Mat.faded)     do if p and p.Parent then pcall(function() p.Transparency=orig end) end end
+		Mat.originals={}; Mat.active={}; Mat.faded={}; dVis(D.matCirc,false); return
+	end
+	local chr=H.myChr(); if not H.validChr(chr) then dVis(D.matCirc,false); return end
+	local root=H.getRoot(chr); if not root then dVis(D.matCirc,false); return end
+	local center=root.Position
+	local radius=Cfg.misc.matRadius
+	local ok3,gme=pcall(function() return Enum.Material[Cfg.misc.matType] end)
+	local goalMat=ok3 and gme or Enum.Material.Glass
+	matOLP.FilterDescendantsInstances={chr}
+	local ok4,parts=pcall(svc.ws.GetPartBoundsInRadius,svc.ws,center,radius,matOLP)
+	if not ok4 or not parts then return end
+	local inRange={}
+	for _,p in ipairs(parts) do
+		if p:IsA("BasePart") and not p:IsDescendantOf(chr) then
+			inRange[p]=true
+			if not Mat.originals[p] then Mat.originals[p]=p.Material end
+			if p.Material~=goalMat then pcall(function() p.Material=goalMat end) end
+			Mat.active[p]=true
+			if Cfg.misc.matFade then
+				local d=(p.Position-center).Magnitude
+				local ed=radius-d
+				if ed<Cfg.misc.matFadeRange and ed>0 then
+					if not Mat.faded[p] then Mat.faded[p]=p.Transparency end
+					pcall(function() p.Transparency=mx(Mat.faded[p] or 0,clamp(1-(ed/Cfg.misc.matFadeRange),0,0.8)) end)
+				elseif Mat.faded[p] then
+					pcall(function() p.Transparency=Mat.faded[p] end); Mat.faded[p]=nil
+				end
+			end
+		end
+	end
+	for p in pairs(Mat.active) do
+		if not inRange[p] then
+			if Mat.originals[p] and p and p.Parent then pcall(function() p.Material=Mat.originals[p] end) end
+			if Mat.faded[p]    and p and p.Parent then pcall(function() p.Transparency=Mat.faded[p]    end) end
+			Mat.originals[p]=nil; Mat.active[p]=nil; Mat.faded[p]=nil
+		end
+	end
+	for p in pairs(Mat.originals) do
+		if not p or not p.Parent then Mat.originals[p]=nil; Mat.active[p]=nil; Mat.faded[p]=nil end
+	end
+	if Cfg.misc.matShowRadius and Draw.alive[D.matCirc] then
+		local sp,on = H.w2v(center)
+		if on and sp then
+			local okE,ep = pcall(function() return svc.cam:WorldToViewportPoint(center+svc.cam.CFrame.RightVector*radius) end)
+			if okE and ep then
+				dSet(D.matCirc,"Position",V2(sp.X,sp.Y))
+				dSet(D.matCirc,"Radius",mx((V2(sp.X,sp.Y)-V2(ep.X,ep.Y)).Magnitude,5))
+				dSet(D.matCirc,"Color",Thm.Acc); dSet(D.matCirc,"Transparency",0.35); dVis(D.matCirc,true)
+			end
+		else dVis(D.matCirc,false) end
+	else dVis(D.matCirc,false) end
+end
+
+-- ═════════════════════════════════════════════════════════════
+--  CHARACTER MODS
+-- ═════════════════════════════════════════════════════════════
+local Mods = { ijConn=nil, flyBV=nil, flyBG=nil, flyVel=ZV3, afkConn=nil, afkThread=nil }
+
+local function setInfJump(on)
+	if on then
+		if Mods.ijConn then return end
+		Mods.ijConn=svc.uis.JumpRequest:Connect(function()
+			local hum=H.getHum(H.myChr())
+			if hum then pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end) end
+		end); hook(Mods.ijConn)
+	else
+		if Mods.ijConn then pcall(function() Mods.ijConn:Disconnect() end); Mods.ijConn=nil end
+	end
+end
+
+local function setFly(on)
+	if on then
+		local chr=H.myChr(); if not H.validChr(chr) then return end
+		local root=H.getRoot(chr); if not root then return end
+		pcall(function()
+			if not Mods.flyBV then
+				Mods.flyBV=Instance.new("BodyVelocity")
+				Mods.flyBV.MaxForce=V3(huge,huge,huge)
+				Mods.flyBV.Velocity=ZV3
+			end
+			if not Mods.flyBG then
+				Mods.flyBG=Instance.new("BodyGyro")
+				Mods.flyBG.MaxTorque=V3(huge,huge,huge)
+			end
+			Mods.flyBV.Parent=root; Mods.flyBG.Parent=root; Mods.flyVel=ZV3
+		end)
+	else
+		pcall(function() if Mods.flyBV then Mods.flyBV.Parent=nil end end)
+		pcall(function() if Mods.flyBG then Mods.flyBG.Parent=nil end end)
+	end
+end
+
+local function tickFly()
+	if not Cfg.misc.fly or not Mods.flyBV or not Mods.flyBG then return end
+	local root=H.myRoot(); if not root then return end
+	pcall(function()
+		if Mods.flyBV.Parent~=root then Mods.flyBV.Parent=root end
+		if Mods.flyBG.Parent~=root then Mods.flyBG.Parent=root end
+		local spd=Cfg.misc.flySpd; local dir=ZV3
+		local uis=svc.uis
+		if uis:IsKeyDown(Enum.KeyCode.W) then dir=dir+F.camCF.LookVector end
+		if uis:IsKeyDown(Enum.KeyCode.S) then dir=dir-F.camCF.LookVector end
+		if uis:IsKeyDown(Enum.KeyCode.A) then dir=dir-F.camCF.RightVector end
+		if uis:IsKeyDown(Enum.KeyCode.D) then dir=dir+F.camCF.RightVector end
+		if uis:IsKeyDown(Enum.KeyCode.Space)       then dir=dir+V3(0,1,0) end
+		if uis:IsKeyDown(Enum.KeyCode.LeftControl) then dir=dir-V3(0,1,0) end
+		local tgt=dir.Magnitude>0 and dir.Unit*spd or ZV3
+		Mods.flyVel=H.dampV3(Mods.flyVel,tgt,0.25,F.dt)
+		Mods.flyBV.Velocity=Mods.flyVel; Mods.flyBG.CFrame=F.camCF
+	end)
+end
+
+local function tickCharMods()
+	local hum=H.getHum(H.myChr()); if not hum then return end
+	pcall(function()
+		if Cfg.misc.spdMod then hum.WalkSpeed=Cfg.misc.spdVal end
+		if Cfg.misc.jmpMod then
+			if hum.UseJumpPower then hum.JumpPower=Cfg.misc.jmpVal
+			else hum.JumpHeight=Cfg.misc.jmpVal*0.25 end
+		end
+		if Cfg.misc.fovMod then svc.cam.FieldOfView=Cfg.misc.fovVal end
+		if Cfg.misc.thirdPerson then
+			svc.lp.CameraMinZoomDistance=Cfg.misc.tpDist
+			svc.lp.CameraMaxZoomDistance=Cfg.misc.tpDist
+		end
+		if Cfg.misc.noFallDmg then
+			pcall(function() hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown,false) end)
+		end
+	end)
+end
+
+local function tickAutoRespawn()
+	if not Cfg.misc.autoRespawn then return end
+	local hum=H.getHum(H.myChr())
+	if hum and (H.prop(hum,"Health") or 100)<=0 then
+		task.delay(.5,function() pcall(function() svc.lp.Character=nil end) end)
+	end
+end
+
+local function tickNoclip()
+	if not Cfg.misc.noclip then return end
+	local chr=H.myChr(); if not H.validChr(chr) then return end
+	pcall(function()
+		for _,p in ipairs(chr:GetDescendants()) do
+			if p:IsA("BasePart") then p.CanCollide=false end
+		end
+	end)
+end
+
+local function setAntiAfk(on)
+	if on then
+		if Mods.afkConn then return end
+		Mods.afkConn=svc.lp.Idled:Connect(function()
+			pcall(function()
+				if svc.vu then
+					svc.vu:Button2Down(ZV2,svc.cam.CFrame); task.wait(.1); svc.vu:Button2Up(ZV2,svc.cam.CFrame)
+				elseif svc.vim then
+					svc.vim:SendKeyEvent(true,Enum.KeyCode.Space,false,game); task.wait(.05); svc.vim:SendKeyEvent(false,Enum.KeyCode.Space,false,game)
+				end
+			end)
+		end); hook(Mods.afkConn)
+		Mods.afkThread=task.spawn(function()
+			while Cfg.misc.antiAfk do
+				task.wait(55)
+				if not Cfg.misc.antiAfk then break end
+				pcall(function()
+					if svc.vu then svc.vu:Button1Down(ZV2,svc.cam.CFrame); task.wait(.05); svc.vu:Button1Up(ZV2,svc.cam.CFrame) end
+				end)
+			end
+		end)
+	else
+		if Mods.afkConn then pcall(function() Mods.afkConn:Disconnect() end); Mods.afkConn=nil end
+		Cfg.misc.antiAfk=false
+	end
+end
+
+do
+	if Cfg.misc.infJump then setInfJump(true) end
+	if Cfg.misc.fly     then setFly(true)     end
+	if Cfg.misc.antiAfk then setAntiAfk(true) end
+	if Cfg.misc.ghost   then setGhost(true)   end
+end
+
+-- ═════════════════════════════════════════════════════════════
+--  TARGET CYCLING
+-- ═════════════════════════════════════════════════════════════
+local function cycleTarget(dir2)
+	local plrs2={}
+	for _,p in ipairs(svc.plrs:GetPlayers()) do
+		if p~=svc.lp and H.isAlive(p) and wlCheck(p.Name) then plrs2[#plrs2+1]=p end
+	end
+	if #plrs2==0 then pushNf("No targets",1.5,"warning"); return end
+	tsort(plrs2,function(a,b) return a.Name<b.Name end)
+	local ci=0
+	for i,p in ipairs(plrs2) do if p.Name==Cfg.orbit.targetName then ci=i; break end end
+	ci=ci+dir2; if ci<1 then ci=#plrs2 end; if ci>#plrs2 then ci=1 end
+	Cfg.orbit.targetName=plrs2[ci].Name; Orb.state="idle"
+	pushNf("Target → "..plrs2[ci].Name,2,"orbit")
+	if UI.tgtDD and UI.tgtDD.Set then UI.tgtDD.Set(plrs2[ci].Name) end
+end
+
+-- ═════════════════════════════════════════════════════════════
+--  KEYBIND MAP
+-- ═════════════════════════════════════════════════════════════
+local Kmap = {
+	Q=Enum.KeyCode.Q, E=Enum.KeyCode.E, X=Enum.KeyCode.X, C=Enum.KeyCode.C, V=Enum.KeyCode.V,
+	F=Enum.KeyCode.F, Z=Enum.KeyCode.Z, T=Enum.KeyCode.T, R=Enum.KeyCode.R, G=Enum.KeyCode.G,
+	H=Enum.KeyCode.H, J=Enum.KeyCode.J, K=Enum.KeyCode.K, L=Enum.KeyCode.L, N=Enum.KeyCode.N,
+	M=Enum.KeyCode.M, P=Enum.KeyCode.P, B=Enum.KeyCode.B, Y=Enum.KeyCode.Y, U=Enum.KeyCode.U,
+	I=Enum.KeyCode.I, O=Enum.KeyCode.O,
+	CapsLock=Enum.KeyCode.CapsLock, LeftAlt=Enum.KeyCode.LeftAlt, LeftShift=Enum.KeyCode.LeftShift,
+	Tab=Enum.KeyCode.Tab, Insert=Enum.KeyCode.Insert, Delete=Enum.KeyCode.Delete,
+	F1=Enum.KeyCode.F1, F2=Enum.KeyCode.F2, F3=Enum.KeyCode.F3, F4=Enum.KeyCode.F4, F5=Enum.KeyCode.F5, F6=Enum.KeyCode.F6,
+	One=Enum.KeyCode.One, Two=Enum.KeyCode.Two, Three=Enum.KeyCode.Three, Four=Enum.KeyCode.Four, Five=Enum.KeyCode.Five,
+}
+local function keyMatch(name,inp)
+	if not name or name=="None" or not inp then return false end
+	local kc=Kmap[name]; return kc and inp.KeyCode==kc
+end
+
+hook(svc.uis.InputBegan:Connect(function(inp,gpe)
+	if gpe then return end
+	if keyMatch(Cfg.orbit.toggleKey,inp) then
+		Cfg.orbit.on=not Cfg.orbit.on
+		if not Cfg.orbit.on then transitionToIdle(); disengageCam() end
+		if UI.orbitToggle and UI.orbitToggle.Set then UI.orbitToggle.Set(Cfg.orbit.on) end
+		pushNf(Cfg.orbit.on and "Orbit ON" or "Orbit OFF",2,Cfg.orbit.on and "orbit" or "warning")
+	end
+	if keyMatch(Cfg.orbit.reverseKey,inp) then
+		Orb.direction=Orb.direction*-1
+		pushNf("Dir: "..(Orb.direction>0 and "CW" or "CCW"),1.5,"info")
+	end
+	if keyMatch(Cfg.orbit.freezeKey,inp) then
+		Orb.frozen=not Orb.frozen
+		pushNf(Orb.frozen and "Frozen" or "Unfrozen",1.5,Orb.frozen and "info" or "success")
+	end
+	if keyMatch(Cfg.orbit.cycleNextKey,inp) then cycleTarget(1)  end
+	if keyMatch(Cfg.orbit.cyclePrevKey,inp) then cycleTarget(-1) end
+	if keyMatch(Cfg.orbit.ghostKey,inp) then
+		Cfg.misc.ghost=not Cfg.misc.ghost
+		setGhost(Cfg.misc.ghost)
+		pushNf(Cfg.misc.ghost and "Ghost ON" or "Ghost OFF",1.5,Cfg.misc.ghost and "info" or "warning")
+	end
+end))
+
+-- ═════════════════════════════════════════════════════════════
+--  RESPAWN HOOKS
+-- ═════════════════════════════════════════════════════════════
+hook(svc.lp.CharacterRemoving:Connect(function()
+	disengageCam(); Cam.cooldown=3.5
+	pcall(function() svc.cam.CameraType=Enum.CameraType.Custom end)
+	Ghost.origTrans={}
+end))
+hook(svc.lp.CharacterAdded:Connect(function(chr)
+	disengageCam(); if Cam.cooldown<2 then Cam.cooldown=2 end
+	task.defer(function()
+		local timeout=tk()+6
+		while tk()<timeout do
+			local r=H.getRoot(chr); local hm=H.getHum(chr)
+			if r and hm and H.prop(hm,"Health") and H.prop(hm,"Health")>0 then break end
+			task.wait(0.15)
+		end
+		pcall(function()
+			local hum=H.getHum(chr)
+			if hum then svc.cam.CameraType=Enum.CameraType.Custom; svc.cam.CameraSubject=hum end
+		end)
+		if Cfg.misc.fly then task.defer(function() setFly(true) end) end
+		if Cfg.misc.ghost then task.defer(function() setGhost(true) end) end
+	end)
+end))
+
+-- ═════════════════════════════════════════════════════════════
+--  TICK LOOPS
+-- ═════════════════════════════════════════════════════════════
+local Tick = {slow=0, save=0, mat=0, wm=0}
+
+hook(svc.rs.RenderStepped:Connect(function(dt)
+	safe(cacheFrame,dt)
+	safe(tickCameraSystem,dt)
+	safe(tickFps)
+	safe(tickNfs,dt)
+	safe(updateThemeAccent)
+	Tick.wm+=dt; if Tick.wm>=0.06 then Tick.wm=0; safe(tickWatermark) end
+end))
+
+hook(svc.rs.Heartbeat:Connect(function(dt)
+	tickOrbit(dt)
+	safe(tickFly)
+	safe(tickAutoPress)
+
+	Tick.slow+=dt
+	if Tick.slow>=0.2 then
+		Tick.slow=0
+		safe(tickCharMods)
+		safe(tickAutoRespawn)
+	end
+
+	Tick.mat+=dt
+	if Tick.mat>=0.05 then Tick.mat=0; safe(tickSmartMat) end
+
+	Tick.save+=dt
+	if Tick.save>=30 then Tick.save=0; task.defer(saveCfg) end
+end))
+
+hook(svc.rs.Stepped:Connect(function() safe(tickNoclip) end))
+
+-- ═════════════════════════════════════════════════════════════
+--  UI LIBRARY (fixed tabs + overlay + player dropdown + click sink)
+-- ═════════════════════════════════════════════════════════════
+local Library = {}
+
+function Library:CreateWindow(title)
+    local parent = svc.cg
+    if not parent then
+        local ok,pg=pcall(function() return svc.lp:WaitForChild("PlayerGui",5) end)
+        parent = ok and pg or nil
+    end
+    if not parent then warn("[DESPAIR v8] No GUI parent."); return nil end
+
+    local uid = "DESPAIRv83_"..tostring(rng(1e5,9e5))
+    local SG  = H.mk("ScreenGui",{
+        Name=uid, Parent=parent, ResetOnSpawn=false,
+        IgnoreGuiInset=true, ZIndexBehavior=Enum.ZIndexBehavior.Sibling,
+    })
+    if not SG then return nil end
+    _G.DESPAIR_GUI_Ref = SG
+
+    local Win = {
+        SG=SG,
+        Root=nil,
+        Shadow=nil,
+        Sections={},
+        ActiveSection=nil,
+        Corners={},
+        uiVisible=true,
+        Overlay=nil,
+        OpenMenu=nil,
+        CloseMenu=nil,
+        MenuActive=nil,
+    }
+
+    function Win:_corner(inst)
+        local cr = H.mk("UICorner",{Parent=inst, CornerRadius=UDim.new(0, Cfg.ui.corner or 0)})
+        if cr then self.Corners[#self.Corners+1]=cr end
+        return cr
+    end
+
+    function Win:SetCorner(px)
+        px = clamp(floor((tonumber(px) or 0)+0.5), 0, 18)
+        Cfg.ui.corner = px
+        for _,cr in ipairs(self.Corners) do
+            if cr and cr.Parent then
+                Tw(cr, {CornerRadius=UDim.new(0,px)}, 0.18, Enum.EasingStyle.Sine)
+            end
+        end
+        task.defer(saveCfg)
+    end
+
+    local Shadow = H.mk("ImageLabel",{
+        Parent=SG, BackgroundTransparency=1,
+        Position=UDim2.new(0,42,0,42), Size=UDim2.new(0,Thm.W+22,0,Thm.H+22),
+        Image="rbxassetid://5554236805", ImageColor3=Color3.new(0,0,0),
+        ImageTransparency=0.55, ScaleType=Enum.ScaleType.Slice,
+        SliceCenter=Rect.new(23,23,277,277), ZIndex=9,
+    })
+
+    local Root = H.mk("Frame",{
+        Parent=SG, BackgroundColor3=Thm.Base,
+        Position=UDim2.new(0,54,0,54), Size=UDim2.new(0,Thm.W,0,Thm.H),
+        BorderSizePixel=0, ZIndex=10,
+    })
+    Win.Shadow=Shadow; Win.Root=Root
+    Win:_corner(Root)
+    H.mk("UIStroke",{Parent=Root,Color=Thm.Stroke2,Thickness=1,Transparency=0.55})
+
+    local Overlay = H.mk("Frame",{
+        Parent=SG, BackgroundTransparency=1,
+        Position=UDim2.new(0,0,0,0), Size=UDim2.new(1,0,1,0),
+        Visible=false, Active=true, ZIndex=25000,
+    })
+    Win.Overlay = Overlay
+
+    function Win:CloseMenu()
+        if Win.MenuActive then
+            pcall(function() Win.MenuActive:Destroy() end)
+            Win.MenuActive=nil
+        end
+        if Overlay then Overlay.Visible=false end
+    end
+    hook(Overlay.InputBegan:Connect(function(i)
+        if i.UserInputType==Enum.UserInputType.MouseButton1 then
+            Win:CloseMenu()
+        end
+    end))
+
+    function Win:OpenMenuAt(absPos, size, buildFn)
+        self:CloseMenu()
+        Overlay.Visible=true
+        local menu = H.mk("Frame",{
+            Parent=Overlay, BackgroundColor3=Thm.Panel2,
+            Position=UDim2.fromOffset(absPos.X, absPos.Y),
+            Size=UDim2.fromOffset(size.X, size.Y),
+            BorderSizePixel=0, ZIndex=25001,
+        })
+        self:_corner(menu)
+        H.mk("UIStroke",{Parent=menu,Color=Thm.Stroke,Thickness=1,Transparency=0.55})
+
+        Win.MenuActive=menu
+        if buildFn then pcall(buildFn, menu) end
+        return menu
+    end
+
+    -- Global click sink so UI doesn't click-through to game buttons
+    if svc.cas then
+        pcall(function()
+            svc.cas:BindAction("DESPAIR_BlockClick", function(_, state, input)
+                if state ~= Enum.UserInputState.Begin then
+                    return Enum.ContextActionResult.Pass
+                end
+                if not Win.Root or not Win.Root.Visible then
+                    return Enum.ContextActionResult.Pass
+                end
+                local pos = input.Position
+                if not pos then
+                    return Enum.ContextActionResult.Pass
+                end
+                local objs = svc.uis:GetGuiObjectsAtPosition(pos.X,pos.Y)
+                for _,g in ipairs(objs) do
+                    if g:IsDescendantOf(Win.Root) or (Win.Overlay and g:IsDescendantOf(Win.Overlay)) then
+                        return Enum.ContextActionResult.Sink
+                    end
+                end
+                return Enum.ContextActionResult.Pass
+            end, false, Enum.UserInputType.MouseButton1)
+        end)
+    end
+
+    -- Header
+    local hdr = H.mk("Frame",{Parent=Root,BackgroundColor3=Thm.Base,Size=UDim2.new(1,0,0,44),BorderSizePixel=0,ZIndex=11})
+    Win:_corner(hdr)
+    H.mk("UIStroke",{Parent=hdr,Color=Thm.Stroke,Thickness=1,Transparency=0.7})
+
+    H.mk("TextLabel",{Parent=hdr,BackgroundTransparency=1,Position=UDim2.new(0,14,0,0),Size=UDim2.new(1,-120,1,0),
+        Text=title,TextColor3=Thm.AccB,Font=Thm.BFnt,TextSize=18,TextXAlignment=Enum.TextXAlignment.Left,ZIndex=12})
+    H.mk("TextLabel",{Parent=hdr,BackgroundTransparency=1,Position=UDim2.new(1,-90,0,0),Size=UDim2.new(0,80,1,0),
+        Text="v8.3",TextColor3=Thm.Sub,Font=Thm.Fnt,TextSize=12,TextXAlignment=Enum.TextXAlignment.Right,ZIndex=12})
+
+    local aBar = H.mk("Frame",{Parent=hdr,BackgroundColor3=Thm.Acc,Size=UDim2.new(1,-18,0,2),Position=UDim2.new(0,9,1,-3),BorderSizePixel=0,ZIndex=12})
+    Win:_corner(aBar)
+
+    -- Drag with inertia
+    do
+        local dragBtn = H.mk("TextButton",{Parent=hdr,BackgroundTransparency=1,Size=UDim2.new(1,0,1,0),Text="",ZIndex=20})
+        local Drag = {active=false,start=ZV2,startPos=nil,vel=ZV2,last=ZV2}
+        hook(dragBtn.InputBegan:Connect(function(i)
+            if i.UserInputType==Enum.UserInputType.MouseButton1 then
+                local p=V2(i.Position.X,i.Position.Y)
+                Drag.active=true; Drag.start=p; Drag.startPos=Root.Position; Drag.vel=ZV2; Drag.last=p
+            end
+        end))
+        hook(svc.uis.InputChanged:Connect(function(i)
+            if Drag.active and i.UserInputType==Enum.UserInputType.MouseMovement then
+                local cur=V2(i.Position.X,i.Position.Y)
+                Drag.vel=Drag.vel*0.7+(cur-Drag.last)*0.3
+                Drag.last=cur
+                local d=cur-Drag.start
+                local nx=clamp(Drag.startPos.X.Offset+d.X,0,F.vpX-Thm.W)
+                local ny=clamp(Drag.startPos.Y.Offset+d.Y,0,F.vpY-Thm.H)
+                Root.Position=UDim2.new(0,nx,0,ny)
+                if Shadow then Shadow.Position=UDim2.new(0,nx-10,0,ny-10) end
+            end
+        end))
+        hook(dragBtn.InputEnded:Connect(function(i)
+            if i.UserInputType==Enum.UserInputType.MouseButton1 then
+                Drag.active=false
+                task.spawn(function()
+                    while Drag.vel.Magnitude>0.5 do
+                        local p3=Root.Position
+                        local nx=clamp(p3.X.Offset+Drag.vel.X*0.08,0,F.vpX-Thm.W)
+                        local ny=clamp(p3.Y.Offset+Drag.vel.Y*0.08,0,F.vpY-Thm.H)
+                        Root.Position=UDim2.new(0,nx,0,ny)
+                        if Shadow then Shadow.Position=UDim2.new(0,nx-10,0,ny-10) end
+                        Drag.vel=Drag.vel*0.88
+                        task.wait()
+                    end
+                end)
+            end
+        end))
+    end
+
+    -- Body
+    local body = H.mk("Frame",{Parent=Root,BackgroundTransparency=1,Position=UDim2.new(0,0,0,44),Size=UDim2.new(1,0,1,-44),BorderSizePixel=0,ZIndex=11})
+
+    -- Sideboard
+    local sideW = 140
+    local side = H.mk("ScrollingFrame",{
+        Parent=body, BackgroundColor3=Thm.Base, Size=UDim2.new(0,sideW,1,0),
+        CanvasSize=UDim2.new(0,0,0,0), ScrollBarThickness=3, ScrollBarImageColor3=Thm.AccD,
+        BorderSizePixel=0, ZIndex=12,
+    })
+    H.mk("UIStroke",{Parent=side,Color=Thm.Stroke,Thickness=1,Transparency=0.75})
+    local sideList = H.mk("UIListLayout",{Parent=side,SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,6)})
+    H.mk("UIPadding",{Parent=side,PaddingTop=UDim.new(0,10),PaddingLeft=UDim.new(0,10),PaddingRight=UDim.new(0,10),PaddingBottom=UDim.new(0,10)})
+
+    hook(sideList:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        side.CanvasSize = UDim2.new(0,0,0,sideList.AbsoluteContentSize.Y + 20)
+    end))
+
+    local content = H.mk("Frame",{Parent=body,BackgroundTransparency=1,Position=UDim2.new(0,sideW+10,0,0),Size=UDim2.new(1,-(sideW+10),1,0),BorderSizePixel=0,ZIndex=12})
+
+    -- Insert toggle
+    hook(svc.uis.InputBegan:Connect(function(inp,gpe)
+        if gpe then return end
+        if inp.KeyCode==Enum.KeyCode.Insert then
+            Win.uiVisible=not Win.uiVisible
+            if Win.uiVisible then
+                Root.Visible=true; if Shadow then Shadow.Visible=true end
+                H.set(Root,"BackgroundTransparency",1); Tw(Root,{BackgroundTransparency=0},.18,Enum.EasingStyle.Sine)
+            else
+                Tw(Root,{BackgroundTransparency=1},.14,Enum.EasingStyle.Sine)
+                task.delay(.14,function()
+                    if not Win.uiVisible then Root.Visible=false; if Shadow then Shadow.Visible=false end end
+                end)
+                Win:CloseMenu()
+            end
+            pushNf(Win.uiVisible and "UI shown" or "UI hidden",1.4,"info")
+        end
+    end))
+
+    -- Sections
+    local function selectSection(sec)
+        if Win.ActiveSection==sec then return end
+        Win.ActiveSection=sec
+        for _,s in ipairs(Win.Sections) do
+            local is = (s==sec)
+            s.Page.Visible = is
+            Tw(s.Btn,{BackgroundColor3=is and Thm.Panel2 or Thm.Panel},.12,Enum.EasingStyle.Sine)
+            Tw(s.BtnTx,{TextColor3=is and Thm.AccB or Thm.Sub},.12,Enum.EasingStyle.Sine)
+        end
+        sec:SelectTab(sec.ActiveTab or sec.Tabs[1])
+    end
+
+    function Win:AddSection(name, icon)
+        local sec = {Name=name, Icon=icon or "•", Tabs={}, ActiveTab=nil, TabWidth=0}
+
+        local btn = H.mk("TextButton",{Parent=side,BackgroundColor3=Thm.Panel,Size=UDim2.new(1,0,0,36),Text="",AutoButtonColor=false,BorderSizePixel=0,ZIndex=13})
+        Win:_corner(btn)
+        H.mk("UIStroke",{Parent=btn,Color=Thm.Stroke,Thickness=1,Transparency=0.65})
+
+        local tx = H.mk("TextLabel",{Parent=btn,BackgroundTransparency=1,Position=UDim2.new(0,10,0,0),Size=UDim2.new(1,-10,1,0),
+            Text=(icon and (icon.."  "..name) or name),TextColor3=Thm.Sub,Font=Thm.BFnt,TextSize=13,TextXAlignment=Enum.TextXAlignment.Left,ZIndex=14})
+        sec.Btn,sec.BtnTx = btn,tx
+
+        local page = H.mk("Frame",{Parent=content,BackgroundTransparency=1,Size=UDim2.new(1,0,1,0),Visible=false,BorderSizePixel=0,ZIndex=12})
+        sec.Page = page
+
+        local top = H.mk("Frame",{Parent=page,BackgroundColor3=Thm.Base,Size=UDim2.new(1,0,0,38),BorderSizePixel=0,ZIndex=13})
+        H.mk("UIStroke",{Parent=top,Color=Thm.Stroke,Thickness=1,Transparency=0.75})
+
+        local tabScroll = H.mk("ScrollingFrame",{
+            Parent=top,
+            BackgroundTransparency=1,
+            Position=UDim2.new(0,10,0,6),
+            Size=UDim2.new(1,-20,1,-12),
+            CanvasSize=UDim2.new(0,0,0,0),
+            ScrollBarThickness=0,
+            ScrollingDirection=Enum.ScrollingDirection.X,
+            BorderSizePixel=0,
+            ZIndex=14,
+        })
+        local tabList = H.mk("UIListLayout",{
+            Parent=tabScroll,
+            SortOrder=Enum.SortOrder.LayoutOrder,
+            FillDirection=Enum.FillDirection.Horizontal,
+            Padding=UDim.new(0,6),
+        })
+
+        hook(tabList:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+            tabScroll.CanvasSize = UDim2.new(0, tabList.AbsoluteContentSize.X + 8, 0, 0)
+        end))
+
+        local tbVel=0; local tbRun=false
+        hook(tabScroll.InputChanged:Connect(function(i)
+            if i.UserInputType==Enum.UserInputType.MouseWheel then
+                tbVel = tbVel - (i.Position.Z*70)
+                if not tbRun then
+                    tbRun=true
+                    task.spawn(function()
+                        while abs(tbVel)>0.5 do
+                            local maxS=mx(0,tabScroll.AbsoluteCanvasSize.X-tabScroll.AbsoluteWindowSize.X)
+                            tabScroll.CanvasPosition=V2(clamp(tabScroll.CanvasPosition.X+tbVel*.1,0,maxS),0)
+                            tbVel=tbVel*.84
+                            task.wait()
+                        end
+                        tbRun=false; tbVel=0
+                    end)
+                end
+            end
+        end))
+
+        local tabPages = H.mk("Frame",{Parent=page,BackgroundTransparency=1,Position=UDim2.new(0,0,0,38),Size=UDim2.new(1,0,1,-38),BorderSizePixel=0,ZIndex=13})
+        sec.TabScroll, sec.TabPages = tabScroll, tabPages
+
+        function sec:SelectTab(tab)
+            if not tab or self.ActiveTab==tab then return end
+            self.ActiveTab=tab
+            for _,t in ipairs(self.Tabs) do
+                local is = (t==tab)
+                t.Page.Visible = is
+                Tw(t.Btn,{BackgroundColor3=is and Thm.Panel2 or Thm.Panel},.12,Enum.EasingStyle.Sine)
+                Tw(t.BtnTx,{TextColor3=is and Thm.AccB or Thm.Sub},.12,Enum.EasingStyle.Sine)
+                Tw(t.Under,{BackgroundTransparency=is and 0 or 1},.12,Enum.EasingStyle.Sine)
+            end
+        end
+
+        function sec:AddTab(tabName)
+            local tab = {Name=tabName}
+
+            local w = slen(tabName)*7+30
+            sec.TabWidth += w
+            tabScroll.CanvasSize = UDim2.new(0, sec.TabWidth, 0, 0)
+
+            local tbtn = H.mk("TextButton",{Parent=tabScroll,BackgroundColor3=Thm.Panel,Size=UDim2.new(0,w,1,0),Text="",AutoButtonColor=false,BorderSizePixel=0,ZIndex=15})
+            Win:_corner(tbtn)
+            H.mk("UIStroke",{Parent=tbtn,Color=Thm.Stroke,Thickness=1,Transparency=0.7})
+
+            local ttx = H.mk("TextLabel",{Parent=tbtn,BackgroundTransparency=1,Size=UDim2.new(1,0,1,0),Text=tabName,TextColor3=Thm.Sub,Font=Thm.BFnt,TextSize=12,ZIndex=16})
+            local under = H.mk("Frame",{Parent=tbtn,BackgroundColor3=Thm.Acc,Size=UDim2.new(1,-12,0,2),Position=UDim2.new(0,6,1,-3),BackgroundTransparency=1,BorderSizePixel=0,ZIndex=16})
+            Win:_corner(under)
+
+            local page2 = H.mk("ScrollingFrame",{Parent=tabPages,BackgroundTransparency=1,Size=UDim2.new(1,0,1,0),
+                ScrollBarThickness=3,ScrollBarImageColor3=Thm.Acc,CanvasSize=UDim2.new(0,0,0,0),
+                BorderSizePixel=0,Visible=false,ZIndex=14})
+            H.mk("UIPadding",{Parent=page2,PaddingTop=UDim.new(0,10),PaddingBottom=UDim.new(0,10),PaddingLeft=UDim.new(0,10),PaddingRight=UDim.new(0,10)})
+            local layout = H.mk("UIListLayout",{Parent=page2,SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,8)})
+
+            hook(layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+                page2.CanvasSize = UDim2.new(0,0,0,layout.AbsoluteContentSize.Y + 24)
+            end))
+
+            tab.Btn,tab.BtnTx,tab.Under,tab.Page,tab.Layout = tbtn,ttx,under,page2,layout
+
+            local function mkRow(lbl, th)
+                th = th or Thm.IH
+                local row = H.mk("Frame",{Parent=page2,BackgroundColor3=Thm.Panel,Size=UDim2.new(1,0,0,th),BorderSizePixel=0,ZIndex=15})
+                Win:_corner(row)
+                H.mk("UIStroke",{Parent=row,Color=Thm.Stroke,Thickness=1,Transparency=0.75})
+
+                local left = H.mk("TextLabel",{Parent=row,BackgroundTransparency=1,Position=UDim2.new(0,12,0,0),Size=UDim2.new(0.46,-12,1,0),
+                    Text=lbl,TextColor3=Thm.Sub,Font=Thm.Fnt,TextSize=Thm.TSz,TextXAlignment=Enum.TextXAlignment.Left,ZIndex=16})
+                local right = H.mk("Frame",{Parent=row,BackgroundTransparency=1,Position=UDim2.new(0.46,0,0,0),Size=UDim2.new(0.54,0,1,0),ZIndex=16})
+                return row,left,right
+            end
+
+            function tab:AddLabel(text)
+                local _,lb,_ = mkRow(" ", 26)
+                lb.Text=text or ""
+                lb.TextColor3=Thm.Dim
+                lb.Font=Thm.BFnt
+                lb.TextSize=12
+                return {SetText=function(t2) if lb then lb.Text=tostring(t2) end end}
+            end
+
+            function tab:AddSeparator()
+                local sep = H.mk("Frame",{Parent=page2,BackgroundTransparency=1,Size=UDim2.new(1,0,0,10),BorderSizePixel=0,ZIndex=15})
+                H.mk("Frame",{Parent=sep,BackgroundColor3=Thm.Stroke,Size=UDim2.new(1,-20,0,1),Position=UDim2.new(0,10,0.5,0),BorderSizePixel=0,ZIndex=16})
+            end
+
+            function tab:AddToggle(o)
+                o=o or {}
+                local st = o.Default and true or false
+                local cb = o.Callback or function() end
+                local _,_,right = mkRow(o.Text or "Toggle")
+
+                local btn = H.mk("TextButton",{Parent=right,BackgroundColor3=st and Thm.AccD or Thm.Panel2,Size=UDim2.new(0,46,0,22),
+                    Position=UDim2.new(0,6,0.5,-11),Text="",AutoButtonColor=false,BorderSizePixel=0,ZIndex=17})
+                Win:_corner(btn)
+                H.mk("UIStroke",{Parent=btn,Color=Thm.Stroke,Thickness=1,Transparency=0.65})
+                local knob = H.mk("Frame",{Parent=btn,BackgroundColor3=Thm.Txt,Size=UDim2.new(0,18,0,18),
+                    Position=st and UDim2.new(1,-20,0.5,-9) or UDim2.new(0,2,0.5,-9),BorderSizePixel=0,ZIndex=18})
+                Win:_corner(knob)
+
+                local stat = H.mk("TextLabel",{Parent=right,BackgroundTransparency=1,Position=UDim2.new(0,60,0,0),Size=UDim2.new(0,80,1,0),
+                    Text=st and "ON" or "OFF",TextColor3=st and Thm.Ok or Thm.Sub,Font=Thm.BFnt,TextSize=11,TextXAlignment=Enum.TextXAlignment.Left,ZIndex=17})
+
+                local function set(v, anim)
+                    st = v and true or false
+                    local dur = anim and 0.16 or 0
+                    Tw(btn,{BackgroundColor3=st and Thm.AccD or Thm.Panel2},dur,Enum.EasingStyle.Sine)
+                    Tw(knob,{Position=st and UDim2.new(1,-20,0.5,-9) or UDim2.new(0,2,0.5,-9)},dur,Enum.EasingStyle.Sine)
+                    stat.Text = st and "ON" or "OFF"
+                    Tw(stat,{TextColor3=st and Thm.Ok or Thm.Sub},dur,Enum.EasingStyle.Sine)
+                    pcall(cb,st)
+                end
+                hook(btn.MouseButton1Click:Connect(function() set(not st,true) end))
+
+                return {Set=function(v) set(v,true) end, Get=function() return st end}
+            end
+
+            function tab:AddButton(o)
+                o=o or {}
+                local cb=o.Callback or function() end
+                local _,_,right = mkRow(o.Text or "Button")
+                local b = H.mk("TextButton",{Parent=right,BackgroundColor3=Thm.AccD,Size=UDim2.new(0,96,0,24),
+                    Position=UDim2.new(0,6,0.5,-12),Text=o.BtnText or "Run",TextColor3=Thm.Txt,Font=Thm.BFnt,TextSize=12,
+                    AutoButtonColor=false,BorderSizePixel=0,ZIndex=17})
+                Win:_corner(b)
+                H.mk("UIStroke",{Parent=b,Color=Thm.Stroke2,Thickness=1,Transparency=0.4})
+                hook(b.MouseEnter:Connect(function() Tw(b,{BackgroundColor3=Thm.Acc},.08,Enum.EasingStyle.Sine) end))
+                hook(b.MouseLeave:Connect(function() Tw(b,{BackgroundColor3=Thm.AccD},.12,Enum.EasingStyle.Sine) end))
+                hook(b.MouseButton1Click:Connect(function()
+                    Tw(b,{BackgroundColor3=Thm.Txt},.04,Enum.EasingStyle.Sine)
+                    task.delay(.06,function() Tw(b,{BackgroundColor3=Thm.AccD},.12,Enum.EasingStyle.Sine) end)
+                    pcall(cb)
+                end))
+            end
+
+            function tab:AddTextInput(o)
+                o=o or {}
+                local cb=o.Callback or function() end
+                local _,_,right = mkRow(o.Text or "Input")
+                local box = H.mk("TextBox",{Parent=right,BackgroundColor3=Thm.Panel2,Size=UDim2.new(1,-12,0,24),Position=UDim2.new(0,6,0.5,-12),
+                    Text=o.Default or "",PlaceholderText=o.Placeholder or "...",TextColor3=Thm.Txt,PlaceholderColor3=Thm.Dim,Font=Thm.BFnt,TextSize=12,
+                    ClearTextOnFocus=false,BorderSizePixel=0,ZIndex=17,TextXAlignment=Enum.TextXAlignment.Left})
+                Win:_corner(box)
+                H.mk("UIStroke",{Parent=box,Color=Thm.Stroke,Thickness=1,Transparency=0.7})
+                hook(box.FocusLost:Connect(function() pcall(cb, box.Text) end))
+                return {Get=function() return box.Text end, Set=function(v) box.Text=tostring(v) end}
+            end
+
+            function tab:AddDropdown(o)
+                o = o or {}
+                local cb      = o.Callback or function() end
+                local items   = o.Items or {}
+                local cur     = o.Default or (items[1] or "None")
+                local searchable = (o.Searchable ~= false)
+
+                local _,_,right = mkRow(o.Text or "Dropdown")
+
+                local sel = H.mk("TextButton",{
+                    Parent=right,
+                    BackgroundColor3=Thm.Panel2,
+                    Size=UDim2.new(1,-12,0,24),
+                    Position=UDim2.new(0,6,0.5,-12),
+                    Text="  "..tostring(cur),
+                    TextColor3=Thm.Txt,
+                    Font=Thm.BFnt,
+                    TextSize=12,
+                    AutoButtonColor=false,
+                    BorderSizePixel=0,
+                    ZIndex=17,
+                    TextXAlignment=Enum.TextXAlignment.Left,
+                })
+                Win:_corner(sel)
+                H.mk("UIStroke",{
+                    Parent=sel,
+                    Color=Thm.Stroke,
+                    Thickness=1,
+                    Transparency=0.7,
+                })
+                H.mk("TextLabel",{
+                    Parent=sel,
+                    BackgroundTransparency=1,
+                    Size=UDim2.new(0,20,1,0),
+                    Position=UDim2.new(1,-20,0,0),
+                    Text="▾",
+                    TextColor3=Thm.AccB,
+                    Font=Thm.BFnt,
+                    TextSize=14,
+                    ZIndex=18,
+                })
+
+                local function set(val, doCb)
+                    cur = tostring(val)
+                    sel.Text = "  "..cur
+                    if doCb then
+                        pcall(cb, cur)
+                    end
+                end
+
+                local function openMenu()
+                    local ap = sel.AbsolutePosition
+                    local as = sel.AbsoluteSize
+                    local menuW = mx(240, mn(420, as.X + 40))
+                    local menuH = 300
+
+                    Win:OpenMenuAt(V2(ap.X, ap.Y + as.Y + 6), V2(menuW, menuH), function(menu)
+                        local search
+                        if searchable then
+                            search = H.mk("TextBox",{
+                                Parent=menu,
+                                BackgroundColor3=Thm.Panel,
+                                Size=UDim2.new(1,-12,0,26),
+                                Position=UDim2.new(0,6,0,6),
+                                Text="",
+                                PlaceholderText="Search...",
+                                TextColor3=Thm.Txt,
+                                PlaceholderColor3=Thm.Dim,
+                                Font=Thm.BFnt,
+                                TextSize=12,
+                                ClearTextOnFocus=false,
+                                BorderSizePixel=0,
+                                ZIndex=25002,
+                                TextXAlignment=Enum.TextXAlignment.Left,
+                            })
+                            Win:_corner(search)
+                            H.mk("UIStroke",{
+                                Parent=search,
+                                Color=Thm.Stroke,
+                                Thickness=1,
+                                Transparency=0.75,
+                            })
+                        end
+
+                        local list = H.mk("ScrollingFrame",{
+                            Parent=menu,
+                            BackgroundTransparency=1,
+                            Position=UDim2.new(0,6,0,searchable and 40 or 8),
+                            Size=UDim2.new(1,-12,1,-(searchable and 46 or 14)),
+                            CanvasSize=UDim2.new(0,0,0,0),
+                            ScrollBarThickness=3,
+                            ScrollBarImageColor3=Thm.Acc,
+                            BorderSizePixel=0,
+                            ZIndex=25002,
+                        })
+                        local ll = H.mk("UIListLayout",{
+                            Parent=list,
+                            SortOrder=Enum.SortOrder.LayoutOrder,
+                            Padding=UDim.new(0,4),
+                        })
+                        hook(ll:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+                            list.CanvasSize = UDim2.new(0,0,0,ll.AbsoluteContentSize.Y + 8)
+                        end))
+
+                        local function build(filter)
+                            filter = slow(filter or "")
+                            for _,c in ipairs(list:GetChildren()) do
+                                if c:IsA("TextButton") then c:Destroy() end
+                            end
+                            for _,it in ipairs(items) do
+                                local v = tostring(it)
+                                if filter=="" or string.find(slow(v), filter, 1, true) then
+                                    local b = H.mk("TextButton",{
+                                        Parent=list,
+                                        BackgroundColor3=(v==cur) and Thm.Panel or Thm.Base,
+                                        Size=UDim2.new(1,0,0,26),
+                                        Text="  "..v,
+                                        TextColor3=(v==cur) and Thm.AccB or Thm.Txt,
+                                        Font=Thm.BFnt,
+                                        TextSize=12,
+                                        AutoButtonColor=false,
+                                        BorderSizePixel=0,
+                                        ZIndex=25003,
+                                        TextXAlignment=Enum.TextXAlignment.Left,
+                                    })
+                                    Win:_corner(b)
+                                    H.mk("UIStroke",{
+                                        Parent=b,
+                                        Color=Thm.Stroke,
+                                        Thickness=1,
+                                        Transparency=0.85,
+                                    })
+                                    hook(b.MouseButton1Click:Connect(function()
+                                        set(v, true)
+                                        Win:CloseMenu()
+                                    end))
+                                end
+                            end
+                        end
+
+                        build("")
+                        if searchable and search then
+                            hook(search:GetPropertyChangedSignal("Text"):Connect(function()
+                                build(search.Text)
+                            end))
+                            task.defer(function() pcall(function() search:CaptureFocus() end) end)
+                        end
+                    end)
+                end
+
+                hook(sel.MouseButton1Click:Connect(function()
+                    if Win.MenuActive then
+                        Win:CloseMenu()
+                    else
+                        openMenu()
+                    end
+                end))
+
+                task.defer(function() pcall(cb, cur) end)
+
+                local api = {}
+
+                function api.Set(v)
+                    set(v, true)
+                end
+
+                function api.Get()
+                    return cur
+                end
+
+                function api.SetItems(newItems)
+                    items = newItems or {}
+                    local found=false
+                    for _,it in ipairs(items) do
+                        if tostring(it) == cur then found=true break end
+                    end
+                    if not found then
+                        local nv = items[1] and tostring(items[1]) or "None"
+                        cur = nv
+                        sel.Text = "  "..cur
+                    end
+                end
+
+                return api
+            end
+
+            -- Player dropdown: builds live list each time you open it
+            function tab:AddPlayerDropdown(o)
+                o=o or {}
+                local cb  = o.Callback or function() end
+                local cur = o.Default or "None"
+
+                local _,_,right = mkRow(o.Text or "Target player")
+
+                local sel = H.mk("TextButton",{
+                    Parent=right,
+                    BackgroundColor3=Thm.Panel2,
+                    Size=UDim2.new(1,-12,0,24),
+                    Position=UDim2.new(0,6,0.5,-12),
+                    Text="  "..tostring(cur),
+                    TextColor3=Thm.Txt,
+                    Font=Thm.BFnt,
+                    TextSize=12,
+                    AutoButtonColor=false,
+                    BorderSizePixel=0,
+                    ZIndex=17,
+                    TextXAlignment=Enum.TextXAlignment.Left,
+                })
+                Win:_corner(sel)
+                H.mk("UIStroke",{
+                    Parent=sel,
+                    Color=Thm.Stroke,
+                    Thickness=1,
+                    Transparency=0.7,
+                })
+                H.mk("TextLabel",{
+                    Parent=sel,
+                    BackgroundTransparency=1,
+                    Size=UDim2.new(0,20,1,0),
+                    Position=UDim2.new(1,-20,0,0),
+                    Text="▾",
+                    TextColor3=Thm.AccB,
+                    Font=Thm.BFnt,
+                    TextSize=14,
+                    ZIndex=18,
+                })
+
+                local function set(name, doCb)
+                    name = name or "None"
+                    cur = name
+                    sel.Text = "  "..cur
+                    if doCb then
+                        pcall(cb, cur)
+                    end
+                end
+
+                local function openMenu()
+                    local ap = sel.AbsolutePosition
+                    local as = sel.AbsoluteSize
+                    local menuW = mx(220, mn(420, as.X + 40))
+                    local menuH = 260
+
+                    Win:OpenMenuAt(V2(ap.X, ap.Y + as.Y + 6), V2(menuW, menuH), function(menu)
+                        local list = H.mk("ScrollingFrame",{
+                            Parent=menu,
+                            BackgroundTransparency=1,
+                            Position=UDim2.new(0,6,0,8),
+                            Size=UDim2.new(1,-12,1,-14),
+                            CanvasSize=UDim2.new(0,0,0,0),
+                            ScrollBarThickness=3,
+                            ScrollBarImageColor3=Thm.Acc,
+                            BorderSizePixel=0,
+                            ZIndex=25002,
+                        })
+                        local ll = H.mk("UIListLayout",{
+                            Parent=list,
+                            SortOrder=Enum.SortOrder.LayoutOrder,
+                            Padding=UDim.new(0,4),
+                        })
+                        hook(ll:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+                            list.CanvasSize = UDim2.new(0,0,0,ll.AbsoluteContentSize.Y + 8)
+                        end))
+
+                        local function addItem(display, color)
+                            local isCur = (display == cur)
+                            local b = H.mk("TextButton",{
+                                Parent=list,
+                                BackgroundColor3=isCur and Thm.Panel2 or Thm.Base,
+                                Size=UDim2.new(1,0,0,26),
+                                Text="  "..display,
+                                TextColor3=isCur and Thm.AccB or (color or Thm.Txt),
+                                Font=Thm.BFnt,
+                                TextSize=12,
+                                AutoButtonColor=false,
+                                BorderSizePixel=0,
+                                ZIndex=25003,
+                                TextXAlignment=Enum.TextXAlignment.Left,
+                            })
+                            Win:_corner(b)
+                            H.mk("UIStroke",{
+                                Parent=b,
+                                Color=Thm.Stroke,
+                                Thickness=1,
+                                Transparency=0.85,
+                            })
+                            hook(b.MouseButton1Click:Connect(function()
+                                set(display, true)
+                                Win:CloseMenu()
+                            end))
+                        end
+
+                        -- "None" first
+                        addItem("None", Thm.Sub)
+
+                        -- Live list of players (re-evaluated on each open)
+                        local listPlayers = {}
+                        for _,p in ipairs(svc.plrs:GetPlayers()) do
+                            if p ~= svc.lp then
+                                if (not Cfg.misc.whitelist) or wlCheck(p.Name) then
+                                    listPlayers[#listPlayers+1] = p
+                                end
+                            end
+                        end
+                        tsort(listPlayers, function(a,b) return a.Name < b.Name end)
+
+                        for _,p in ipairs(listPlayers) do
+                            local alive = H.isAlive(p)
+                            local col = alive and Thm.Txt or Thm.Dim
+                            addItem(p.Name, col)
+                        end
+                    end)
+                end
+
+                hook(sel.MouseButton1Click:Connect(function()
+                    if Win.MenuActive then
+                        Win:CloseMenu()
+                    else
+                        openMenu()
+                    end
+                end))
+
+                task.defer(function() pcall(cb, cur) end)
+
+                -- also provide a backup manual entry under the dropdown
+                tab:AddTextInput({
+                    Text        = "Target (manual)",
+                    Placeholder = "Exact username...",
+                    Default     = (cur ~= "None" and cur or ""),
+                    Callback    = function(v)
+                        v = (v or ""):match("^%s*(.-)%s*$")
+                        if v == "" then
+                            set("None", true)
+                        else
+                            set(v, true)
+                        end
+                    end
+                })
+
+                return {
+                    Set = function(v) set(v, true) end,
+                    Get = function() return cur end,
+                }
+            end
+
+            hook(tbtn.MouseButton1Click:Connect(function() sec:SelectTab(tab) end))
+            sec.Tabs[#sec.Tabs+1]=tab
+            if #sec.Tabs==1 then task.defer(function() sec:SelectTab(tab) end) end
+            return tab
+        end
+
+        hook(btn.MouseButton1Click:Connect(function() selectSection(sec) end))
+        Win.Sections[#Win.Sections+1]=sec
+        if #Win.Sections==1 then task.defer(function() selectSection(sec) end) end
+        return sec
+    end
+
+    return Win
+end
+
+-- ═════════════════════════════════════════════════════════════
+--  BUILD UI
+-- ═════════════════════════════════════════════════════════════
+do
+    local win = Library:CreateWindow("DESPAIR ORBIT")
+    if win then
+        UI.win = win
+
+        local secOrbit = win:AddSection("Orbit", "⟳")
+        local tabMain  = secOrbit:AddTab("Main")
+        local tabVisual= secOrbit:AddTab("Visual")
+        local tabRecord= secOrbit:AddTab("Record")
+        local tabCam   = secOrbit:AddTab("Camera")
+
+        UI.statusLabel = tabMain:AddLabel(OrbNames[Orb.state] or "Idle")
+
+        UI.orbitToggle = tabMain:AddToggle({
+            Text    = "Orbit enabled",
+            Default = Cfg.orbit.on,
+            Callback = function(v)
+                Cfg.orbit.on = v
+                if not v then
+                    transitionToIdle("Orbit off")
+                    disengageCam()
+                end
+            end
+        })
+
+        UI.tgtDD = tabMain:AddPlayerDropdown({
+            Text    = "Target player",
+            Default = (Cfg.orbit.targetName ~= "" and Cfg.orbit.targetName or "None"),
+            Callback = function(name)
+                if not name or name=="None" or name=="" then
+                    Cfg.orbit.targetName = "None"
+                    transitionToIdle("Target cleared")
+                    return
+                end
+                Cfg.orbit.targetName = name
+                Orb.state = "idle"
+            end
+        })
+
+        tabMain:AddDropdown({
+            Text    = "Mode",
+            Items   = {"Orbit","Follow"},
+            Default = Cfg.orbit.mode,
+            Callback = function(v)
+                Cfg.orbit.mode = v
+                Orb.state = "idle"
+            end
+        })
+
+        local patNames = {}
+        for k in pairs(Patterns) do patNames[#patNames+1] = k end
+        tsort(patNames,function(a,b) return a<b end)
+        tabMain:AddDropdown({
+            Text    = "Pattern",
+            Items   = patNames,
+            Default = Cfg.orbit.pattern,
+            Callback = function(v)
+                if Patterns[v] then
+                    Cfg.orbit.pattern = v
+                end
+            end
+        })
+
+        tabMain:AddToggle({
+            Text    = "Look at target",
+            Default = Cfg.orbit.lookAt,
+            Callback = function(v) Cfg.orbit.lookAt = v end,
+        })
+        tabMain:AddToggle({
+            Text    = "Auto nearest",
+            Default = Cfg.orbit.autoNearest,
+            Callback = function(v) Cfg.orbit.autoNearest = v end,
+        })
+        tabMain:AddToggle({
+            Text    = "Smart targeting",
+            Default = Cfg.orbit.smartTarget,
+            Callback = function(v) Cfg.orbit.smartTarget = v end,
+        })
+        tabMain:AddToggle({
+            Text    = "Line-of-sight check",
+            Default = Cfg.orbit.losCheck,
+            Callback = function(v) Cfg.orbit.losCheck = v end,
+        })
+        tabMain:AddToggle({
+            Text    = "Auto noclip while orbiting",
+            Default = Cfg.orbit.autoNoclip,
+            Callback = function(v) Cfg.orbit.autoNoclip = v end,
+        })
+        tabMain:AddToggle({
+            Text    = "Anti-void",
+            Default = Cfg.orbit.antiVoid,
+            Callback = function(v) Cfg.orbit.antiVoid = v end,
+        })
+        tabMain:AddSeparator()
+        tabMain:AddTextInput({
+            Text        = "Speed (deg/s)",
+            Default     = tostring(Cfg.orbit.speed),
+            Placeholder = "150",
+            Callback    = function(t)
+                local n = tonumber(t)
+                if n then Cfg.orbit.speed = clamp(n,5,720) end
+            end
+        })
+        tabMain:AddTextInput({
+            Text        = "Distance",
+            Default     = tostring(Cfg.orbit.distance),
+            Placeholder = "10",
+            Callback    = function(t)
+                local n = tonumber(t)
+                if n then Cfg.orbit.distance = clamp(n,2,120) end
+            end
+        })
+        tabMain:AddTextInput({
+            Text        = "Height offset",
+            Default     = tostring(Cfg.orbit.height),
+            Placeholder = "0",
+            Callback    = function(t)
+                local n = tonumber(t)
+                if n then Cfg.orbit.height = clamp(n,-40,80) end
+            end
+        })
+        tabMain:AddTextInput({
+            Text        = "Sky height (ascend)",
+            Default     = tostring(Cfg.orbit.skyHeight),
+            Placeholder = "300",
+            Callback    = function(t)
+                local n = tonumber(t)
+                if n then Cfg.orbit.skyHeight = clamp(n,40,1000) end
+            end
+        })
+
+        -- Visual tab
+        tabVisual:AddToggle({Text="Target box", Default=Cfg.orbit.tgtBox, Callback=function(v) Cfg.orbit.tgtBox=v end})
+        tabVisual:AddToggle({Text="Target tracer", Default=Cfg.orbit.tgtTracer, Callback=function(v) Cfg.orbit.tgtTracer=v end})
+        tabVisual:AddToggle({Text="Target health bar", Default=Cfg.orbit.tgtHealthBar, Callback=function(v) Cfg.orbit.tgtHealthBar=v end})
+        tabVisual:AddToggle({Text="Target skeleton", Default=Cfg.orbit.tgtSkeleton, Callback=function(v) Cfg.orbit.tgtSkeleton=v end})
+        tabVisual:AddToggle({Text="Target name & info", Default=Cfg.orbit.tgtName, Callback=function(v) Cfg.orbit.tgtName=v; Cfg.orbit.tgtInfo=v end})
+        tabVisual:AddToggle({Text="Target snapline", Default=Cfg.orbit.tgtSnap, Callback=function(v) Cfg.orbit.tgtSnap=v end})
+        tabVisual:AddToggle({Text="Highlight", Default=Cfg.orbit.tgtHighlight, Callback=function(v) Cfg.orbit.tgtHighlight=v end})
+        tabVisual:AddSeparator()
+        tabVisual:AddToggle({Text="HUD compass", Default=Cfg.orbit.hud and Cfg.orbit.hudCompass, Callback=function(v) Cfg.orbit.hud=v; Cfg.orbit.hudCompass=v end})
+        tabVisual:AddToggle({Text="Radar", Default=Cfg.orbit.radar, Callback=function(v) Cfg.orbit.radar=v end})
+        tabVisual:AddToggle({Text="Crosshair", Default=Cfg.orbit.crosshair, Callback=function(v) Cfg.orbit.crosshair=v end})
+        tabVisual:AddToggle({Text="Trail", Default=Cfg.orbit.trail, Callback=function(v) Cfg.orbit.trail=v end})
+        tabVisual:AddToggle({Text="Speed lines", Default=Cfg.orbit.speedLines, Callback=function(v) Cfg.orbit.speedLines=v end})
+        tabVisual:AddToggle({Text="Coordinate display", Default=Cfg.orbit.coordDisplay, Callback=function(v) Cfg.orbit.coordDisplay=v end})
+        tabVisual:AddToggle({Text="Show orbit path", Default=Cfg.orbit.showPath, Callback=function(v) Cfg.orbit.showPath=v end})
+        tabVisual:AddTextInput({
+            Text="Path segments", Default=tostring(Cfg.orbit.pathSegs),
+            Callback=function(t) local n=tonumber(t); if n then Cfg.orbit.pathSegs=clamp(floor(n+0.5),8,64) end end
+        })
+        tabVisual:AddTextInput({
+            Text="Trail length", Default=tostring(Cfg.orbit.trailLen),
+            Callback=function(t) local n=tonumber(t); if n then Cfg.orbit.trailLen=clamp(floor(n+0.5),2,30) end end
+        })
+
+        -- Record tab
+        local recLbl = tabRecord:AddLabel("Frames: "..tostring(#Rec.frames))
+        tabRecord:AddToggle({
+            Text    = "Enable recording (store positions)",
+            Default = Cfg.orbit.recordOrbit,
+            Callback = function(v) Cfg.orbit.recordOrbit = v end,
+        })
+        tabRecord:AddButton({
+            Text    = "Recording",
+            BtnText = "Start / Stop",
+            Callback = function()
+                Rec.recording = not Rec.recording
+                if Rec.recording then
+                    Rec.frames = {}
+                    Rec.idx = 1
+                    Rec.replaying = false
+                    pushNf("Recording orbit path...",2,"orbit")
+                else
+                    pushNf("Recording stopped ("..tostring(#Rec.frames).." frames)",2,"info")
+                end
+                if recLbl and recLbl.SetText then
+                    recLbl.SetText("Frames: "..tostring(#Rec.frames))
+                end
+            end,
+        })
+        tabRecord:AddButton({
+            Text    = "Replay",
+            BtnText = "Play / Stop",
+            Callback = function()
+                if #Rec.frames == 0 then
+                    pushNf("No recording data",2,"warning")
+                    return
+                end
+                Rec.replaying = not Rec.replaying
+                if Rec.replaying then
+                    Rec.recording = false
+                    Rec.idx = 1
+                    Orb.state = "replaying"
+                    pushNf("Replay started",2,"orbit")
+                else
+                    Orb.state = "idle"
+                    pushNf("Replay stopped",2,"info")
+                end
+            end,
+        })
+
+        -- Camera tab
+        tabCam:AddDropdown({
+            Text    = "Camera mode",
+            Items   = {"Free","Lock","Chase"},
+            Default = Cfg.orbit.camMode,
+            Callback = function(v)
+                if v == "Free" or v == "Lock" or v == "Chase" then
+                    Cfg.orbit.camMode = v
+                    disengageCam()
+                end
+            end
+        })
+        tabCam:AddTextInput({Text="Lock distance", Default=tostring(Cfg.orbit.camLockDist), Callback=function(t) local n=tonumber(t); if n then Cfg.orbit.camLockDist=clamp(n,4,80) end end})
+        tabCam:AddTextInput({Text="Lock height",   Default=tostring(Cfg.orbit.camLockHeight), Callback=function(t) local n=tonumber(t); if n then Cfg.orbit.camLockHeight=clamp(n,0,40) end end})
+        tabCam:AddTextInput({Text="Camera smoothing", Default=tostring(Cfg.orbit.camChaseSmooth), Callback=function(t) local n=tonumber(t); if n then Cfg.orbit.camChaseSmooth=clamp(n,1,20) end end})
+        tabCam:AddTextInput({Text="Return distance", Default=tostring(Cfg.orbit.camReturnDist), Callback=function(t) local n=tonumber(t); if n then Cfg.orbit.camReturnDist=clamp(n,5,120) end end})
+        tabCam:AddTextInput({Text="Pan speed", Default=tostring(Cfg.orbit.camPanSpeed), Callback=function(t) local n=tonumber(t); if n then Cfg.orbit.camPanSpeed=clamp(n,0.3,5) end end})
+        tabCam:AddToggle({Text="Banking (tilt while turning)", Default=Cfg.orbit.banking, Callback=function(v) Cfg.orbit.banking=v end})
+        tabCam:AddTextInput({Text="Bank angle", Default=tostring(Cfg.orbit.bankAngle), Callback=function(t) local n=tonumber(t); if n then Cfg.orbit.bankAngle=clamp(n,0,40) end end})
+
+        -- Player section
+        local secPlayer = win:AddSection("Player", "👤")
+        local tabPMain  = secPlayer:AddTab("Main")
+        tabPMain:AddToggle({Text="Noclip", Default=Cfg.misc.noclip, Callback=function(v) Cfg.misc.noclip=v end})
+        tabPMain:AddToggle({
+            Text="Infinite jump", Default=Cfg.misc.infJump,
+            Callback=function(v) Cfg.misc.infJump=v; setInfJump(v) end
+        })
+        tabPMain:AddToggle({
+            Text="Fly", Default=Cfg.misc.fly,
+            Callback=function(v) Cfg.misc.fly=v; setFly(v) end
+        })
+        tabPMain:AddTextInput({Text="Fly speed", Default=tostring(Cfg.misc.flySpd), Callback=function(t) local n=tonumber(t); if n then Cfg.misc.flySpd=clamp(n,5,300) end end})
+        tabPMain:AddSeparator()
+        tabPMain:AddToggle({Text="Walkspeed override", Default=Cfg.misc.spdMod, Callback=function(v) Cfg.misc.spdMod=v end})
+        tabPMain:AddTextInput({Text="Walkspeed", Default=tostring(Cfg.misc.spdVal), Callback=function(t) local n=tonumber(t); if n then Cfg.misc.spdVal=clamp(n,4,200) end end})
+        tabPMain:AddToggle({Text="Jump override", Default=Cfg.misc.jmpMod, Callback=function(v) Cfg.misc.jmpMod=v end})
+        tabPMain:AddTextInput({Text="Jump value", Default=tostring(Cfg.misc.jmpVal), Callback=function(t) local n=tonumber(t); if n then Cfg.misc.jmpVal=clamp(n,10,200) end end})
+        tabPMain:AddToggle({Text="FOV override", Default=Cfg.misc.fovMod, Callback=function(v) Cfg.misc.fovMod=v end})
+        tabPMain:AddTextInput({Text="FOV", Default=tostring(Cfg.misc.fovVal), Callback=function(t) local n=tonumber(t); if n then Cfg.misc.fovVal=clamp(n,40,120) end end})
+        tabPMain:AddToggle({Text="Third person lock", Default=Cfg.misc.thirdPerson, Callback=function(v) Cfg.misc.thirdPerson=v end})
+        tabPMain:AddTextInput({Text="Third person distance", Default=tostring(Cfg.misc.tpDist), Callback=function(t) local n=tonumber(t); if n then Cfg.misc.tpDist=clamp(n,2,100) end end})
+        tabPMain:AddToggle({Text="No fall damage", Default=Cfg.misc.noFallDmg, Callback=function(v) Cfg.misc.noFallDmg=v end})
+        tabPMain:AddToggle({Text="Auto respawn", Default=Cfg.misc.autoRespawn, Callback=function(v) Cfg.misc.autoRespawn=v end})
+        tabPMain:AddSeparator()
+        tabPMain:AddToggle({
+            Text="Anti-AFK", Default=Cfg.misc.antiAfk,
+            Callback=function(v) Cfg.misc.antiAfk=v; setAntiAfk(v) end
+        })
+        tabPMain:AddToggle({
+            Text="Ghost mode", Default=Cfg.misc.ghost,
+            Callback=function(v) Cfg.misc.ghost=v; setGhost(v) end
+        })
+
+        -- Extras
+        local secExtra = win:AddSection("Extras", "★")
+        local tabMat   = secExtra:AddTab("World / Mat")
+        tabMat:AddToggle({Text="Smart material override", Default=Cfg.misc.matOn, Callback=function(v) Cfg.misc.matOn=v end})
+        tabMat:AddTextInput({
+            Text="Material (e.g. Glass, ForceField)", Default=Cfg.misc.matType,
+            Callback=function(t) t=tostring(t or ""):match("^%s*(.-)%s*$"); if t~="" then Cfg.misc.matType=t end end
+        })
+        tabMat:AddTextInput({Text="Material radius", Default=tostring(Cfg.misc.matRadius), Callback=function(t) local n=tonumber(t); if n then Cfg.misc.matRadius=clamp(n,10,200) end end})
+        tabMat:AddToggle({Text="Show radius ring", Default=Cfg.misc.matShowRadius, Callback=function(v) Cfg.misc.matShowRadius=v end})
+        tabMat:AddToggle({Text="Fade transparency near player", Default=Cfg.misc.matFade, Callback=function(v) Cfg.misc.matFade=v end})
+
+        local tabAP = secExtra:AddTab("AutoPress")
+        tabAP:AddToggle({
+            Text="Auto key press", Default=Cfg.misc.autoPress,
+            Callback=function(v) Cfg.misc.autoPress=v; AP.on=v end
+        })
+        tabAP:AddTextInput({
+            Text="Key (e.g. Q, E, F)", Default=Cfg.misc.apKey,
+            Callback=function(t) t=tostring(t or ""):match("^%s*(.-)%s*$"); if t=="" then t="Q" end; Cfg.misc.apKey=t; AP.key=t end
+        })
+        tabAP:AddTextInput({
+            Text="Interval (sec)", Default=tostring(Cfg.misc.apInterval),
+            Callback=function(t) local n=tonumber(t); if n then Cfg.misc.apInterval=clamp(n,0.02,5); AP.interval=Cfg.misc.apInterval end end
+        })
+        tabAP:AddTextInput({
+            Text="Hold duration (sec)", Default=tostring(Cfg.misc.apDuration),
+            Callback=function(t) local n=tonumber(t); if n then Cfg.misc.apDuration=clamp(n,0.01,2); AP.duration=Cfg.misc.apDuration end end
+        })
+
+        -- Config
+        local secCfg  = win:AddSection("Config", "⚙")
+        local tabCfg  = secCfg:AddTab("Config")
+        tabCfg:AddToggle({
+            Text    = "Use whitelist file",
+            Default = Cfg.misc.whitelist,
+            Callback = function(v)
+                Cfg.misc.whitelist = v
+                WL.enabled = v
+                wlSave()
+            end,
+        })
+        UI.wlCountLbl = tabCfg:AddLabel("Whitelist: DESPAIR_WHITELIST.txt (edit manually)")
+        tabCfg:AddToggle({Text="Watermark", Default=Cfg.misc.wm, Callback=function(v) Cfg.misc.wm=v end})
+        tabCfg:AddTextInput({
+            Text="UI corner radius", Default=tostring(Cfg.ui.corner or 10),
+            Callback=function(t) local n=tonumber(t); if n then win:SetCorner(n) end end
+        })
+        tabCfg:AddSeparator()
+        local function bindKeyInput(label, cfgKey)
+            tabCfg:AddTextInput({
+                Text        = label,
+                Default     = Cfg.orbit[cfgKey],
+                Placeholder = "None or key (Q,E,Tab,...)",
+                Callback    = function(t)
+                    t = tostring(t or ""):match("^%s*(.-)%s*$")
+                    if t == "" then t = "None" end
+                    Cfg.orbit[cfgKey] = t
+                end
+            })
+        end
+        bindKeyInput("Toggle orbit key",  "toggleKey")
+        bindKeyInput("Reverse direction key", "reverseKey")
+        bindKeyInput("Freeze orbit key",  "freezeKey")
+        bindKeyInput("Next target key",   "cycleNextKey")
+        bindKeyInput("Prev target key",   "cyclePrevKey")
+        bindKeyInput("Ghost toggle key",  "ghostKey")
+
+        win:SetCorner(Cfg.ui.corner or 10)
+    end
+end
+
+-- ═════════════════════════════════════════════════════════════
+--  CLEANUP
+-- ═════════════════════════════════════════════════════════════
+_G.DESPAIRv8Cleanup=function()
+	pcall(function() svc.rs:UnbindFromRenderStep(CAM_KEY) end)
+	disengageCam()
+	unhookAll()
+	clearTgtConns()
+	Orb.state="idle"; Orb.tgtPlr=nil; Orb.currentPos=nil
+	AP.on=false; Cfg.misc.antiAfk=false
+
+	pcall(function() svc.cam.CameraType=Enum.CameraType.Custom; svc.cam.FieldOfView=70 end)
+	pcall(function() svc.lp.CameraMinZoomDistance=.5; svc.lp.CameraMaxZoomDistance=400 end)
+	pcall(function() local hum=H.getHum(H.myChr()); if hum then svc.cam.CameraSubject=hum end end)
+
+	for p,orig in pairs(Mat.originals) do if p and p.Parent then pcall(function() p.Material=orig end) end end
+	for p,orig in pairs(Mat.faded)     do if p and p.Parent then pcall(function() p.Transparency=orig end) end end
+	Mat.originals={}; Mat.active={}; Mat.faded={}; VB.data={}
+
+	hideAllViz()
+
+	for d in pairs(Draw.alive) do dNuke(d) end
+	Draw.alive=setmetatable({},{__mode="k"})
+	Draw.count=0
+
+	if Cfg.misc.fly then setFly(false) end
+	H.kill(Mods.flyBV); Mods.flyBV=nil
+	H.kill(Mods.flyBG); Mods.flyBG=nil
+
+	pcall(function()
+		local chr=H.myChr()
+		if chr then
+			for _,p in ipairs(chr:GetDescendants()) do
+				if p:IsA("BasePart") then p.CanCollide=true end
+			end
+		end
+	end)
+
+	if svc.cas then pcall(function() svc.cas:UnbindAction("DESPAIR_BlockClick") end) end
+
+	pcall(saveCfg)
+	if _G.DESPAIR_GUI_Ref and _G.DESPAIR_GUI_Ref.Parent then pcall(function() _G.DESPAIR_GUI_Ref:Destroy() end) end
+	_G.DESPAIR_GUI_Ref=nil
+	_G.DESPAIRv8Cleanup=nil
+end
